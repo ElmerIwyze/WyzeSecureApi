@@ -5,22 +5,20 @@
 # 
 # 🔐 AUTHENTICATION FLOW EXPLAINED:
 # 
-# NEW USER REGISTRATION (3-step process):
+# NEW USER REGISTRATION (2-step process):
 # ┌─────────────────────────────────────────────────────────────┐
 # │ 1. POST /register                                           │
 # │    → Creates user in Cognito with UNCONFIRMED status        │
 # │    → Sends OTP code (check CloudWatch logs in dev)          │
 # │    → Returns session token                                  │
+# │    ⚠️ User cannot login yet - needs OTP verification        │
 # │                                                             │
 # │ 2. POST /verify-otp (with OTP from step 1)                 │
 # │    → Verifies the OTP code                                  │
-# │    → Changes user status: UNCONFIRMED → CONFIRMED           │
+# │    → Cognito auto-confirms user (UNCONFIRMED → CONFIRMED)   │
 # │    → Returns auth tokens (idToken, refreshToken as cookies) │
-# │    ✅ REGISTRATION NOW COMPLETE - user can access app       │
-# │                                                             │
-# │ 3. GET /me (or any protected endpoint)                     │
-# │    → Uses idToken cookie automatically                      │
-# │    → Returns user profile data                              │
+# │    ✅ REGISTRATION COMPLETE - user authenticated & phone    │
+# │       ownership verified!                                   │
 # └─────────────────────────────────────────────────────────────┘
 # 
 # RETURNING USER LOGIN (2-step process):
@@ -51,12 +49,15 @@
 ###############################################
 # 📝 What happens:
 # - Creates user in Cognito with status: UNCONFIRMED
+# - Sets phone_number attribute
 # - Generates and sends OTP (check CloudWatch logs: /aws/lambda/wyzesecure-create-auth-challenge-dev)
-# - Returns session token for next step
+# - Returns session token for OTP verification
 #
-# ⚠️ IMPORTANT: User is NOT fully registered yet!
-# - User exists in Cognito but cannot login until OTP is verified
-# - Must complete TEST 3 to confirm user and finish registration
+# ⚠️ SECURITY: User is UNCONFIRMED until OTP is verified!
+# - User exists in Cognito but CANNOT login
+# - Phone ownership NOT proven yet
+# - Must complete TEST 3 to confirm user (UNCONFIRMED → CONFIRMED)
+# - Only AFTER OTP verification does user get access
 #
 # @name register
 POST {{baseUrl}}/secure/auth/register
@@ -126,20 +127,11 @@ Content-Type: application/json
 ###############################################
 # TEST 3: Verify OTP
 ###############################################
-# 📝 What happens:
-# 
-# FOR NEW USERS (from TEST 1):
+# 📝 What happens (SAME for both new and returning users):
 # - Verifies the OTP code
-# - Changes user status: UNCONFIRMED → CONFIRMED
 # - Returns authentication tokens (idToken, refreshToken)
 # - Sets HttpOnly cookies automatically
-# ✅ REGISTRATION IS NOW COMPLETE!
-#
-# FOR RETURNING USERS (from TEST 2):
-# - Verifies the OTP code
-# - Returns authentication tokens
-# - Sets HttpOnly cookies automatically
-# ✅ LOGIN IS NOW COMPLETE!
+# ✅ AUTHENTICATION COMPLETE!
 #
 # ⚠️ REQUIRED: 
 # 1. Get the OTP code from CloudWatch logs:

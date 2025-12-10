@@ -146,7 +146,7 @@ async function registerUser(body: RegisterBody): Promise<APIGatewayProxyResult> 
   }
 
   try {
-    // Create user in Cognito
+    // Create user in Cognito as UNCONFIRMED
     const signUpParams = {
       ClientId: COGNITO_CLIENT_ID,
       Username: phoneNumber,
@@ -166,7 +166,9 @@ async function registerUser(body: RegisterBody): Promise<APIGatewayProxyResult> 
     const signUpCommand = new SignUpCommand(signUpParams);
     await cognitoClient.send(signUpCommand);
 
-    // Now initiate OTP flow
+    // Now initiate OTP flow for verification
+    // The Pre-Authentication trigger will allow UNCONFIRMED users to proceed
+    // When OTP is verified, Cognito will automatically confirm the user
     const commandInput: InitiateAuthCommandInput = {
       AuthFlow: 'CUSTOM_AUTH',
       ClientId: COGNITO_CLIENT_ID,
@@ -193,10 +195,14 @@ async function registerUser(body: RegisterBody): Promise<APIGatewayProxyResult> 
 
     // Check if user already exists
     if (error && typeof error === 'object' && 'name' in error && error.name === 'UsernameExistsException') {
+      // User exists - could be CONFIRMED (use /send-otp) or UNCONFIRMED (lost OTP, need to resend)
       return {
         statusCode: 409,
         headers: corsHeaders,
-        body: JSON.stringify({ error: 'User with this phone number already exists' })
+        body: JSON.stringify({ 
+          error: 'User with this phone number already exists',
+          message: 'If you are a registered user, use /send-otp to login. If you did not complete registration, please contact support.'
+        })
       };
     }
 

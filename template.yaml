@@ -215,6 +215,60 @@ Resources:
   # Cognito Custom Auth Lambda Triggers
   # ==========================================
 
+  PreAuthenticationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+        External:
+          - "@aws-sdk/*"
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-pre-authentication-${Environment}"
+      CodeUri: src/cognito-triggers/pre-authentication/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Allows UNCONFIRMED users to proceed with custom auth flow
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  PreAuthenticationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-pre-authentication-${Environment}"
+      RetentionInDays: 7
+
+  PreAuthenticationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PreAuthenticationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+        - UserPoolId: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
+
   DefineAuthChallengeFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -386,6 +440,7 @@ Resources:
   UserPoolLambdaConfig:
     Type: Custom::CognitoUserPoolLambdaConfig
     DependsOn:
+      - PreAuthenticationPermission
       - DefineAuthChallengePermission
       - CreateAuthChallengePermission
       - VerifyAuthChallengePermission
@@ -395,6 +450,7 @@ Resources:
         - UseCognitoStackImport
         - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
         - !Ref CognitoUserPoolId
+      PreAuthentication: !GetAtt PreAuthenticationFunction.Arn
       DefineAuthChallenge: !GetAtt DefineAuthChallengeFunction.Arn
       CreateAuthChallenge: !GetAtt CreateAuthChallengeFunction.Arn
       VerifyAuthChallengeResponse: !GetAtt VerifyAuthChallengeFunction.Arn
@@ -425,6 +481,7 @@ Resources:
             const params = {
               UserPoolId: event.ResourceProperties.UserPoolId,
               LambdaConfig: {
+                PreAuthentication: event.ResourceProperties.PreAuthentication,
                 DefineAuthChallenge: event.ResourceProperties.DefineAuthChallenge,
                 CreateAuthChallenge: event.ResourceProperties.CreateAuthChallenge,
                 VerifyAuthChallengeResponse: event.ResourceProperties.VerifyAuthChallengeResponse
