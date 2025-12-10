@@ -31,20 +31,20 @@ Resources:
             Action: 'execute-api:Invoke'
             Resource: '*'
 
-  # Proxy resource for /proxy path
-  ProxyResource:
+  # Secure resource for /secure path
+  SecureResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref ApiGateway
       ParentId: !GetAtt ApiGateway.RootResourceId
-      PathPart: 'proxy'
+      PathPart: 'secure'
 
-  # OPTIONS method for CORS preflight on /proxy
-  ProxyOptionsMethod:
+  # OPTIONS method for CORS preflight on /secure
+  SecureOptionsMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref ApiGateway
-      ResourceId: !Ref ProxyResource
+      ResourceId: !Ref SecureResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
       Integration:
@@ -99,7 +99,7 @@ Resources:
   ApiGatewayBaseDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
-      - ProxyOptionsMethod
+      - SecureOptionsMethod
       - RootOptionsMethod
     Properties:
       RestApiId: !Ref ApiGateway
@@ -124,11 +124,11 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-ApiGatewayDeploymentId"
 
-  ProxyResourceId:
-    Description: Proxy resource ID (/proxy)
-    Value: !Ref ProxyResource
+  SecureResourceId:
+    Description: Secure resource ID (/secure)
+    Value: !Ref SecureResource
     Export:
-      Name: !Sub "${AWS::StackName}-ProxyResourceId"
+      Name: !Sub "${AWS::StackName}-SecureResourceId"
 
   ApiGatewayRestApiUrl:
     Description: Base URL of the API Gateway (without stage)

@@ -24,7 +24,7 @@ This document summarizes the key patterns implemented in this project based on t
 ### 1. Shared API Template (`template-shared-api.yaml`)
 **Purpose:** Foundation infrastructure only
 - Creates base API Gateway
-- Creates `/proxy` resource
+- Creates `/secure` resource
 - Creates dummy OPTIONS methods (required for deployment)
 - **NO stages, NO environment-specific methods**
 - **Exports** key IDs for downstream templates
@@ -33,7 +33,7 @@ This document summarizes the key patterns implemented in this project based on t
 **Purpose:** Environment-specific resources
 - Imports shared API Gateway ID
 - Creates environment-specific Lambda functions
-- Adds resources and methods under `/proxy`
+- Adds resources and methods under `/secure`
 - Creates **Stage** with **stage variables**
 - Creates **Deployment** with dependencies on all methods
 
@@ -46,9 +46,9 @@ Uri: arn:aws:lambda:region:account:function:${stageVariables.stackPrefix}-auth-$
 ```
 
 **At runtime:**
-- `/dev/proxy/auth/send-otp` → `wyzesecure-auth-dev:dev`
-- `/staging/proxy/auth/send-otp` → `wyzesecure-auth-staging:staging`
-- `/prod/proxy/auth/send-otp` → `wyzesecure-auth-prod:prod`
+- `/dev/secure/auth/send-otp` → `wyzesecure-auth-dev:dev`
+- `/staging/secure/auth/send-otp` → `wyzesecure-auth-staging:staging`
+- `/prod/secure/auth/send-otp` → `wyzesecure-auth-prod:prod`
 
 ## CloudFormation Export/Import Pattern
 
@@ -59,9 +59,9 @@ Outputs:
   ApiGatewayId:
     Export:
       Name: !Sub "${AWS::StackName}-ApiGatewayId"
-  ProxyResourceId:
+  SecureResourceId:
     Export:
-      Name: !Sub "${AWS::StackName}-ProxyResourceId"
+      Name: !Sub "${AWS::StackName}-SecureResourceId"
   ApiGatewayRestApiUrl:
     Export:
       Name: !Sub "${AWS::StackName}-ApiGatewayRestApiUrl"
@@ -73,7 +73,7 @@ Outputs:
 RestApiId:
   Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
 ParentId:
-  Fn::ImportValue: !Sub "${SharedApiStackName}-ProxyResourceId"
+  Fn::ImportValue: !Sub "${SharedApiStackName}-SecureResourceId"
 ```
 
 ## SAM Config Pattern
@@ -195,14 +195,14 @@ ApiGatewayStage:
 After complete deployment:
 
 ```
-https://{api-id}.execute-api.us-west-1.amazonaws.com/dev/proxy/auth/send-otp
-https://{api-id}.execute-api.us-west-1.amazonaws.com/dev/proxy/auth/verify-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/dev/secure/auth/send-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/dev/secure/auth/verify-otp
 
-https://{api-id}.execute-api.us-west-1.amazonaws.com/staging/proxy/auth/send-otp
-https://{api-id}.execute-api.us-west-1.amazonaws.com/staging/proxy/auth/verify-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/staging/secure/auth/send-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/staging/secure/auth/verify-otp
 
-https://{api-id}.execute-api.us-west-1.amazonaws.com/prod/proxy/auth/send-otp
-https://{api-id}.execute-api.us-west-1.amazonaws.com/prod/proxy/auth/verify-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/prod/secure/auth/send-otp
+https://{api-id}.execute-api.us-west-1.amazonaws.com/prod/secure/auth/verify-otp
 ```
 
 All using the **same API Gateway**, different **stages**, routing to different **Lambda functions**.

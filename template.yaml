@@ -33,16 +33,25 @@ Parameters:
     Type: String
     Default: wyzesecure-shared-api
     Description: Name of the shared API Gateway CloudFormation stack
+  CognitoStackName:
+    Type: String
+    Default: ""
+    Description: Name of the Cognito stack to import IDs from (leave empty to use parameters)
   CognitoUserPoolId:
     Type: String
-    Description: Cognito User Pool ID for phone authentication
+    Default: ""
+    Description: Cognito User Pool ID (only used if CognitoStackName is empty)
   CognitoClientId:
     Type: String
-    Description: Cognito User Pool Client ID
+    Default: ""
+    Description: Cognito User Pool Client ID (only used if CognitoStackName is empty)
   CorsOrigin:
     Type: String
     Default: "*"
     Description: CORS origin for API responses
+
+Conditions:
+  UseCognitoStackImport: !Not [!Equals [!Ref CognitoStackName, ""]]
 
 Resources:
   # Common Dependencies Lambda Layer
@@ -79,8 +88,14 @@ Resources:
         - !Ref CommonDependenciesLayer
       Environment:
         Variables:
-          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
-          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COGNITO_USER_POOL_ID: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolClientId"
+            - !Ref CognitoClientId
           CORS_ORIGIN: !Ref CorsOrigin
       Policies:
         - Version: '2012-10-17'
@@ -92,7 +107,12 @@ Resources:
                 - cognito-idp:GetUser
                 - cognito-idp:AdminInitiateAuth
                 - cognito-idp:AdminRespondToAuthChallenge
-              Resource: !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
+              Resource: !Sub
+                - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${PoolId}"
+                - PoolId: !If
+                    - UseCognitoStackImport
+                    - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+                    - !Ref CognitoUserPoolId
       AutoPublishAlias: !Ref Environment
 
   AuthFunctionLogGroup:
@@ -123,7 +143,10 @@ Resources:
         - !Ref CommonDependenciesLayer
       Environment:
         Variables:
-          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_USER_POOL_ID: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
           AWS_REGION: !Ref AWS::Region
       Policies:
         - Version: '2012-10-17'
@@ -167,17 +190,17 @@ Resources:
         - ApiId:
             Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
 
-  # API Gateway Resources under /proxy/auth
+  # API Gateway Resources under /secure/auth
   AuthResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId:
         Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
       ParentId:
-        Fn::ImportValue: !Sub "${SharedApiStackName}-ProxyResourceId"
+        Fn::ImportValue: !Sub "${SharedApiStackName}-SecureResourceId"
       PathPart: 'auth'
 
-  # /proxy/auth/send-otp - Send OTP to phone number
+  # /secure/auth/send-otp - Send OTP to phone number
   SendOtpResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -233,7 +256,7 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
-  # /proxy/auth/verify-otp - Verify OTP and authenticate
+  # /secure/auth/verify-otp - Verify OTP and authenticate
   VerifyOtpResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -289,7 +312,7 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
-  # /proxy/auth/refresh - Refresh tokens (PROTECTED)
+  # /secure/auth/refresh - Refresh tokens (PROTECTED)
   RefreshResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -348,7 +371,7 @@ Resources:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Credentials: true
 
-  # /proxy/auth/logout - Clear cookies (PUBLIC)
+  # /secure/auth/logout - Clear cookies (PUBLIC)
   LogoutResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -404,7 +427,7 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
-  # /proxy/auth/me - Get current user (PROTECTED)
+  # /secure/auth/me - Get current user (PROTECTED)
   MeResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -570,35 +593,35 @@ Outputs:
   SendOtpEndpoint:
     Description: Send OTP endpoint
     Value: !Sub
-      - "${BaseUrl}/${Environment}/proxy/auth/send-otp"
+      - "${BaseUrl}/${Environment}/secure/auth/send-otp"
       - BaseUrl:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 
   VerifyOtpEndpoint:
     Description: Verify OTP endpoint
     Value: !Sub
-      - "${BaseUrl}/${Environment}/proxy/auth/verify-otp"
+      - "${BaseUrl}/${Environment}/secure/auth/verify-otp"
       - BaseUrl:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 
   RefreshEndpoint:
     Description: Refresh token endpoint
     Value: !Sub
-      - "${BaseUrl}/${Environment}/proxy/auth/refresh"
+      - "${BaseUrl}/${Environment}/secure/auth/refresh"
       - BaseUrl:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 
   LogoutEndpoint:
     Description: Logout endpoint
     Value: !Sub
-      - "${BaseUrl}/${Environment}/proxy/auth/logout"
+      - "${BaseUrl}/${Environment}/secure/auth/logout"
       - BaseUrl:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 
   MeEndpoint:
     Description: Get current user endpoint
     Value: !Sub
-      - "${BaseUrl}/${Environment}/proxy/auth/me"
+      - "${BaseUrl}/${Environment}/secure/auth/me"
       - BaseUrl:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 

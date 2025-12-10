@@ -1,7 +1,7 @@
 # WyzeSecure - HttpOnly Cookie Authentication Implementation
 
 ## Overview
-Implemented secure, Netflix-style authentication using HttpOnly cookies with phone number + OTP verification. The system uses a Lambda Authorizer to validate JWT tokens from cookies instead of a proxy Lambda pattern.
+Implemented secure, Netflix-style authentication using HttpOnly cookies with phone number + OTP verification. The system uses a Lambda Authorizer to validate JWT tokens from cookies.
 
 ---
 
@@ -27,7 +27,7 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 ### 1. **Lambda Authorizer** (`src/authorizer/`)
 - **Purpose**: Validates JWT tokens from HttpOnly cookies
-- **File**: `src/authorizer/index.js`
+- **File**: `src/authorizer/index.ts`
 - **Package**: `src/authorizer/package.json`
 - **Features**:
   - Extracts `idToken` from Cookie header
@@ -38,14 +38,14 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
   - Caches authorization result (5 minutes)
 
 ### 2. **Updated Auth Lambda** (`src/auth/`)
-- **Modified**: `src/auth/index.js`
+- **Modified**: `src/auth/index.ts`
 - **Updated**: `src/auth/package.json` (added `jsonwebtoken`)
 - **New Endpoints**:
-  - `POST /proxy/auth/send-otp` - Send OTP (PUBLIC)
-  - `POST /proxy/auth/verify-otp` - Verify OTP, returns cookies (PUBLIC)
-  - `POST /proxy/auth/refresh` - Refresh tokens (PROTECTED)
-  - `POST /proxy/auth/logout` - Clear cookies (PUBLIC)
-  - `GET /proxy/auth/me` - Get current user (PROTECTED)
+  - `POST /secure/auth/send-otp` - Send OTP (PUBLIC)
+  - `POST /secure/auth/verify-otp` - Verify OTP, returns cookies (PUBLIC)
+  - `POST /secure/auth/refresh` - Refresh tokens (PROTECTED)
+  - `POST /secure/auth/logout` - Clear cookies (PUBLIC)
+  - `GET /secure/auth/me` - Get current user (PROTECTED)
 
 ### 3. **HttpOnly Cookie Implementation**
 - **ID Token Cookie**: `idToken`, 1 hour lifetime
@@ -60,9 +60,9 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 - Added `AuthorizerFunction` resource
 - Added `ApiGatewayAuthorizer` (REQUEST type)
 - Created 3 new API Gateway resources:
-  - `/proxy/auth/refresh` (with authorizer)
-  - `/proxy/auth/logout` (public)
-  - `/proxy/auth/me` (with authorizer)
+  - `/secure/auth/refresh` (with authorizer)
+  - `/secure/auth/logout` (public)
+  - `/secure/auth/me` (with authorizer)
 - Updated deployment dependencies
 - Added new endpoint outputs
 
@@ -72,11 +72,11 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 | Endpoint | Method | Auth Required | Description |
 |----------|--------|---------------|-------------|
-| `/proxy/auth/send-otp` | POST | ❌ No | Initiate OTP flow, sends SMS |
-| `/proxy/auth/verify-otp` | POST | ❌ No | Verify OTP, returns HttpOnly cookies |
-| `/proxy/auth/refresh` | POST | ✅ Yes | Refresh tokens using refresh cookie |
-| `/proxy/auth/logout` | POST | ❌ No | Clear authentication cookies |
-| `/proxy/auth/me` | GET | ✅ Yes | Get current user from token |
+| `/secure/auth/send-otp` | POST | ❌ No | Initiate OTP flow, sends SMS |
+| `/secure/auth/verify-otp` | POST | ❌ No | Verify OTP, returns HttpOnly cookies |
+| `/secure/auth/refresh` | POST | ✅ Yes | Refresh tokens using refresh cookie |
+| `/secure/auth/logout` | POST | ❌ No | Clear authentication cookies |
+| `/secure/auth/me` | GET | ✅ Yes | Get current user from token |
 
 ---
 
@@ -114,12 +114,12 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 ### Initial Login
 ```
-1. Client → POST /proxy/auth/send-otp { phoneNumber }
+1. Client → POST /secure/auth/send-otp { phoneNumber }
 2. API Gateway → Auth Lambda → Cognito
 3. Cognito triggers: define-auth-challenge → create-auth-challenge
 4. SMS sent to user
 
-5. Client → POST /proxy/auth/verify-otp { phoneNumber, otp, session }
+5. Client → POST /secure/auth/verify-otp { phoneNumber, otp, session }
 6. API Gateway → Auth Lambda → Cognito
 7. Cognito triggers: verify-auth-challenge → define-auth-challenge
 8. Auth Lambda returns:
@@ -130,7 +130,7 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 ### Protected Request
 ```
-1. Client → GET /proxy/auth/me (Cookie: idToken=...)
+1. Client → GET /secure/auth/me (Cookie: idToken=...)
 2. API Gateway invokes Authorizer Lambda
 3. Authorizer:
    - Extracts idToken from Cookie
@@ -142,7 +142,7 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 ### Token Refresh
 ```
-1. Client → POST /proxy/auth/refresh (Cookie: refreshToken=...)
+1. Client → POST /secure/auth/refresh (Cookie: refreshToken=...)
 2. API Gateway invokes Authorizer (validates idToken if present)
 3. Auth Lambda:
    - Extracts refreshToken from cookies
@@ -152,7 +152,7 @@ Implemented secure, Netflix-style authentication using HttpOnly cookies with pho
 
 ### Logout
 ```
-1. Client → POST /proxy/auth/logout
+1. Client → POST /secure/auth/logout
 2. Auth Lambda returns:
    Set-Cookie: idToken=; Max-Age=0
    Set-Cookie: refreshToken=; Max-Age=0
@@ -190,7 +190,7 @@ exports.handler = async (event) => {
 ```javascript
 // Login
 async function login(phoneNumber, otp, session) {
-  const response = await fetch('/proxy/auth/verify-otp', {
+  const response = await fetch('/secure/auth/verify-otp', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include', // CRITICAL: Include cookies
@@ -203,7 +203,7 @@ async function login(phoneNumber, otp, session) {
 
 // Get current user
 async function getCurrentUser() {
-  const response = await fetch('/proxy/auth/me', {
+  const response = await fetch('/secure/auth/me', {
     method: 'GET',
     credentials: 'include' // Send cookies
   });
@@ -213,7 +213,7 @@ async function getCurrentUser() {
 
 // Refresh token
 async function refreshToken() {
-  await fetch('/proxy/auth/refresh', {
+  await fetch('/secure/auth/refresh', {
     method: 'POST',
     credentials: 'include'
   });
@@ -221,7 +221,7 @@ async function refreshToken() {
 
 // Logout
 async function logout() {
-  await fetch('/proxy/auth/logout', {
+  await fetch('/secure/auth/logout', {
     method: 'POST',
     credentials: 'include'
   });
@@ -283,14 +283,14 @@ parameter_overrides = [
 
 ### 1. Send OTP
 ```bash
-curl -X POST https://api.example.com/dev/proxy/auth/send-otp \
+curl -X POST https://api.example.com/dev/secure/auth/send-otp \
   -H "Content-Type: application/json" \
   -d '{"phoneNumber":"+12345678900"}'
 ```
 
 ### 2. Verify OTP (Get Cookies)
 ```bash
-curl -X POST https://api.example.com/dev/proxy/auth/verify-otp \
+curl -X POST https://api.example.com/dev/secure/auth/verify-otp \
   -H "Content-Type: application/json" \
   -c cookies.txt \
   -d '{
@@ -302,28 +302,28 @@ curl -X POST https://api.example.com/dev/proxy/auth/verify-otp \
 
 ### 3. Get Current User (Protected)
 ```bash
-curl -X GET https://api.example.com/dev/proxy/auth/me \
+curl -X GET https://api.example.com/dev/secure/auth/me \
   -b cookies.txt
 ```
 
 ### 4. Refresh Token
 ```bash
-curl -X POST https://api.example.com/dev/proxy/auth/refresh \
+curl -X POST https://api.example.com/dev/secure/auth/refresh \
   -b cookies.txt \
   -c cookies.txt
 ```
 
 ### 5. Logout
 ```bash
-curl -X POST https://api.example.com/dev/proxy/auth/logout \
+curl -X POST https://api.example.com/dev/secure/auth/logout \
   -b cookies.txt
 ```
 
 ---
 
-## Key Differences from Proxy Pattern
+## Key Differences from Manual Routing Pattern
 
-| Feature | Proxy Lambda | Lambda Authorizer |
+| Feature | Manual Routing | Lambda Authorizer |
 |---------|--------------|-------------------|
 | **Routing** | Manual invocation | API Gateway handles |
 | **Caching** | None | 5 minutes (configurable) |
@@ -336,7 +336,7 @@ curl -X POST https://api.example.com/dev/proxy/auth/logout \
 
 ## Benefits of This Approach
 
-✅ **Simpler Architecture** - No proxy Lambda needed
+✅ **Simpler Architecture** - No routing proxy Lambda needed
 ✅ **Better Performance** - Authorization cached for 5 minutes
 ✅ **Lower Cost** - Fewer Lambda invocations
 ✅ **AWS Standard** - Well-documented pattern
