@@ -20,7 +20,7 @@ AWS Serverless Authentication with **HttpOnly cookies**, **phone OTP**, and **La
 
 # Or deploy selectively
 .\deploy-all.ps1 -Environment dev -CognitoOnly      # Cognito only
-.\deploy-all.ps1 -Environment dev -LambdasOnly      # Lambdas only
+.\deploy-all.ps1 -Environment dev -AuthOnly      # Lambdas only
 
 # Generate env.json for local testing
 .\generate-env-json.ps1 -Environment dev
@@ -131,7 +131,7 @@ WyzeSecure/
 | 🚀 Deploy everything | `.\deploy-all.ps1 -Environment dev` |
 | 🔐 Deploy Cognito only | `.\deploy-all.ps1 -Environment dev -CognitoOnly` |
 | 🌐 Deploy API Gateway only | `.\deploy-all.ps1 -Environment dev -ApiOnly` |
-| ⚡ Deploy Lambdas only | `.\deploy-all.ps1 -Environment dev -LambdasOnly` |
+| ⚡ Deploy Lambdas only | `.\deploy-all.ps1 -Environment dev -AuthOnly` |
 | 🔧 Generate env.json | `.\generate-env-json.ps1 -Environment dev` |
 | 🐳 Start local API | `sam local start-api --env-vars env.json --port 3001` |
 | 📊 View stack outputs | `aws cloudformation describe-stacks --stack-name wyzesecure-dev` |
@@ -161,7 +161,7 @@ After initial deployment, you can deploy specific components:
 .\deploy-all.ps1 -Environment dev -ApiOnly
 
 # Deploy only Lambdas (fastest - for code changes)
-.\deploy-all.ps1 -Environment dev -LambdasOnly
+.\deploy-all.ps1 -Environment dev -AuthOnly
 ```
 
 **Benefits:**
@@ -410,7 +410,7 @@ aws sns verify-sms-sandbox-phone-number --phone-number "+12345678900" --one-time
 ```powershell
 .\deploy-all.ps1 -Environment dev -CognitoOnly    # Step 1
 .\deploy-all.ps1 -Environment dev -ApiOnly        # Step 2
-.\deploy-all.ps1 -Environment dev -LambdasOnly    # Step 3
+.\deploy-all.ps1 -Environment dev -AuthOnly    # Step 3
 ```
 
 ### Issue: Local testing fails with "No such container"

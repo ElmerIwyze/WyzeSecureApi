@@ -6,41 +6,47 @@
 .DESCRIPTION
     This script can deploy:
     1. Cognito User Pool only
-    2. Shared API Gateway only
-    3. Environment Stack (Lambdas) only
+    2. Shared API Gateway foundation only
+    3. Environment Stack (Lambdas + API endpoints + Stage) only
     4. All stacks in correct order
 
 .PARAMETER Environment
     Environment to deploy (dev, staging, prod)
 
 .PARAMETER CognitoOnly
-    Deploy only Cognito stack
+    Deploy only Cognito User Pool stack
 
 .PARAMETER ApiOnly
-    Deploy only Shared API Gateway stack
+    Deploy only Shared API Gateway foundation stack (no Lambdas)
 
-.PARAMETER LambdasOnly
-    Deploy only Environment stack (Lambdas + endpoints)
+.PARAMETER AuthOnly
+    Deploy only Auth stack (Auth Lambdas, API endpoints, Stage deployment)
+    This includes:
+    - Lambda functions (Auth, Authorizer, Cognito triggers)
+    - Lambda Layer (CommonDependencies)
+    - API Gateway resources (/secure/auth/*)
+    - API Gateway methods (POST, GET, OPTIONS)
+    - Stage deployment (dev/staging/prod)
 
 .PARAMETER NoBuild
     Skip SAM build step (use existing .aws-sam/build)
 
 .EXAMPLE
-    # Deploy everything
+    # Deploy everything in correct order
     .\deploy-all.ps1 -Environment dev
     
 .EXAMPLE
-    # Deploy only Cognito
+    # Deploy only Cognito User Pool
     .\deploy-all.ps1 -Environment dev -CognitoOnly
     
 .EXAMPLE
-    # Deploy only Lambdas
-    .\deploy-all.ps1 -Environment dev -LambdasOnly
+    # Deploy only Auth stack (Lambdas + endpoints)
+    .\deploy-all.ps1 -Environment dev -AuthOnly
     
 .EXAMPLE
-    # Deploy API Gateway and Lambdas (skip Cognito)
+    # Deploy API Gateway foundation and Auth stack (skip Cognito)
     .\deploy-all.ps1 -Environment dev -ApiOnly
-    .\deploy-all.ps1 -Environment dev -LambdasOnly
+    .\deploy-all.ps1 -Environment dev -AuthOnly
 #>
 
 param(
@@ -55,7 +61,7 @@ param(
     [switch]$ApiOnly,
     
     [Parameter(ParameterSetName='Selective')]
-    [switch]$LambdasOnly,
+    [switch]$AuthOnly,
     
     [switch]$NoBuild
 )
@@ -78,7 +84,7 @@ if ($CognitoOnly) {
     $DeployCognito = $true
 } elseif ($ApiOnly) {
     $DeploySharedApi = $true
-} elseif ($LambdasOnly) {
+} elseif ($AuthOnly) {
     $DeployEnvironment = $true
 } else {
     # Deploy all if no specific option selected
@@ -92,7 +98,7 @@ Write-Host "  WyzeSecure Deployment - $Environment" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Cognito:     $(if ($DeployCognito) { '✅ Yes' } else { '⏭️  Skip' })" -ForegroundColor $(if ($DeployCognito) { 'Green' } else { 'Gray' })
 Write-Host "Shared API:  $(if ($DeploySharedApi) { '✅ Yes' } else { '⏭️  Skip' })" -ForegroundColor $(if ($DeploySharedApi) { 'Green' } else { 'Gray' })
-Write-Host "Lambdas:     $(if ($DeployEnvironment) { '✅ Yes' } else { '⏭️  Skip' })" -ForegroundColor $(if ($DeployEnvironment) { 'Green' } else { 'Gray' })
+Write-Host "Auth Stack:  $(if ($DeployEnvironment) { '✅ Yes (Lambdas + Endpoints + Stage)' } else { '⏭️  Skip' })" -ForegroundColor $(if ($DeployEnvironment) { 'Green' } else { 'Gray' })
 Write-Host ""
 
 # Step 1: Deploy Cognito Stack
@@ -149,8 +155,6 @@ if ($DeploySharedApi) {
 
 # Step 3: Deploy Environment Stack (auto-imports Cognito IDs)
 if ($DeployEnvironment) {
-# Step 3: Deploy Environment Stack (auto-imports Cognito IDs)
-if ($DeployEnvironment) {
     Write-Host "[3/3] Deploying Environment Stack..." -ForegroundColor Yellow
     Write-Host "Stack: $EnvironmentStackName" -ForegroundColor Gray
     Write-Host "Cognito Import: $CognitoStackName`n" -ForegroundColor Gray
@@ -164,8 +168,14 @@ if ($DeployEnvironment) {
         }
     }
 
+    # Generate unique deployment timestamp to force new API Gateway deployment
+    $DeploymentTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
+    Write-Host "Deployment Timestamp: $DeploymentTimestamp" -ForegroundColor Gray
+
     Write-Host "Deploying Environment stack..." -ForegroundColor Gray
-    sam deploy --config-env $Environment --no-confirm-changeset
+    # Append DeploymentTimestamp to existing parameter_overrides from samconfig.toml
+    sam deploy --config-env $Environment --no-confirm-changeset `
+        --parameter-overrides "StackPrefix=$StackPrefix Environment=$Environment SharedApiStackName=$SharedApiStackName CognitoStackName=$CognitoStackName CorsOrigin=* DeploymentTimestamp=$DeploymentTimestamp"
     if ($LASTEXITCODE -ne 0) { 
         Write-Host "❌ Deployment failed!" -ForegroundColor Red
         exit 1 
@@ -195,7 +205,6 @@ if ($DeployCognito) {
     $cognitoOutputs = aws cloudformation describe-stacks `
         --stack-name $CognitoStackName `
         --region $Region `
-        --query "Stacks[0].Outputs[?OutputKey=='UserPoolId' || OutputKey=='UserPoolClientId'].{Key:OutputKey,Value:OutputValue}" `
         --output table 2>$null
 
     if ($cognitoOutputs) {
@@ -211,7 +220,6 @@ if ($DeployEnvironment) {
     $apiOutputs = aws cloudformation describe-stacks `
         --stack-name $EnvironmentStackName `
         --region $Region `
-        --query "Stacks[0].Outputs[?contains(OutputKey,'Endpoint')].{Endpoint:OutputKey,URL:OutputValue}" `
         --output table 2>$null
 
     if ($apiOutputs) {
@@ -231,23 +239,20 @@ if ($DeployEnvironment) {
     if ($baseUrl) {
         $apiUrl = $baseUrl -replace '/secure/auth/send-otp$', ''
         
-        Write-Host @"
-
-# Send OTP
-curl -X POST $apiUrl/secure/auth/send-otp \
-  -H "Content-Type: application/json" \
-  -d '{"phoneNumber":"+12345678900"}'
-
-# Verify OTP
-curl -X POST $apiUrl/secure/auth/verify-otp \
-  -H "Content-Type: application/json" \
-  -c cookies.txt \
-  -d '{"phoneNumber":"+12345678900","otp":"123456","session":"SESSION"}'
-
-# Get current user
-curl -X GET $apiUrl/secure/auth/me -b cookies.txt
-
-"@ -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "# Send OTP" -ForegroundColor Gray
+        Write-Host "curl -X POST $apiUrl/secure/auth/send-otp \" -ForegroundColor Gray
+        Write-Host '  -H "Content-Type: application/json" \' -ForegroundColor Gray
+        Write-Host '  -d ''{"phoneNumber":"+12345678900"}''' -ForegroundColor Gray
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "# Verify OTP" -ForegroundColor Gray
+        Write-Host "curl -X POST $apiUrl/secure/auth/verify-otp \" -ForegroundColor Gray
+        Write-Host '  -H "Content-Type: application/json" \' -ForegroundColor Gray
+        Write-Host '  -c cookies.txt \' -ForegroundColor Gray
+        Write-Host '  -d ''{"phoneNumber":"+12345678900","otp":"123456","session":"SESSION"}''' -ForegroundColor Gray
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "# Get current user" -ForegroundColor Gray
+        Write-Host "curl -X GET $apiUrl/secure/auth/me -b cookies.txt" -ForegroundColor Gray
     }
 }
 
@@ -256,12 +261,12 @@ Write-Host "Region: $Region" -ForegroundColor Gray
 Write-Host "Environment: $Environment" -ForegroundColor Gray
 
 if ($CognitoOnly) {
-    Write-Host "`n💡 Next step: Deploy Lambdas with:" -ForegroundColor Yellow
-    Write-Host "   .\deploy-all.ps1 -Environment $Environment -LambdasOnly`n" -ForegroundColor Gray
+    Write-Host "`n💡 Next step: Deploy Auth stack with:" -ForegroundColor Yellow
+    Write-Host "   .\deploy-all.ps1 -Environment $Environment -AuthOnly`n" -ForegroundColor Gray
 } elseif ($ApiOnly) {
-    Write-Host "`n💡 Next step: Deploy Lambdas with:" -ForegroundColor Yellow
-    Write-Host "   .\deploy-all.ps1 -Environment $Environment -LambdasOnly`n" -ForegroundColor Gray
-} elseif ($LambdasOnly) {
+    Write-Host "`n💡 Next step: Deploy Auth stack with:" -ForegroundColor Yellow
+    Write-Host "   .\deploy-all.ps1 -Environment $Environment -AuthOnly`n" -ForegroundColor Gray
+} elseif ($AuthOnly) {
     Write-Host "`n💡 For local testing, generate env.json:" -ForegroundColor Yellow
     Write-Host "   .\generate-env-json.ps1 -Environment $Environment`n" -ForegroundColor Gray
 }

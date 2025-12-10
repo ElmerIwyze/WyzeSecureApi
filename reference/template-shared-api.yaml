@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Auditron Shared API Gateway - Foundation infrastructure only. Service templates add their resources.
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: auditron
+    Description: Prefix for resource names to avoid conflicts
+  CorsOrigin:
+    Type: String
+    Default: "*"
+    Description: CORS origin for API responses (set to specific domain in production)
+
+Resources:
+  # Single API Gateway for all environments
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${StackPrefix}-core-api"
+      Description: "Auditron GDPR Compliance API - Multi-stage Gateway"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      BinaryMediaTypes:
+        - 'multipart/form-data'
+        - 'application/x-www-form-urlencoded'
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 'execute-api:Invoke'
+            Resource: '*'
+
+  # Proxy resource for /proxy path
+  ProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'proxy'
+
+  # OPTIONS method for CORS preflight on /proxy
+  ProxyOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.header.cookie: false
+        method.request.header.Cookie: false
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie,cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+
+
+  # Root OPTIONS method for CORS preflight
+  RootOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !GetAtt ApiGateway.RootResourceId
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.header.cookie: false
+        method.request.header.Cookie: false
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie,cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # ============================================================================
+  # API Gateway Deployment - includes all methods defined above
+  # ============================================================================
+  
+  ApiGatewayBaseDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      # Foundation methods only - service templates will create their own deployments
+      - ProxyOptionsMethod
+      - RootOptionsMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      Description: "Base deployment for shared API Gateway with core routing"
+
+Outputs:
+  ApiGatewayId:
+    Description: ID of the shared API Gateway
+    Value: !Ref ApiGateway
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayId"
+
+  ApiGatewayRootResourceId:
+    Description: Root resource ID of the API Gateway
+    Value: !GetAtt ApiGateway.RootResourceId
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayRootResourceId"
+
+  ApiGatewayBaseDeploymentId:
+    Description: Base deployment ID for the shared API Gateway
+    Value: !Ref ApiGatewayBaseDeployment
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayDeploymentId"
+
+  ProxyResourceId:
+    Description: Proxy resource ID (/proxy)
+    Value: !Ref ProxyResource
+    Export:
+      Name: !Sub "${AWS::StackName}-ProxyResourceId"
+
+
+
+  ApiGatewayRestApiUrl:
+    Description: Base URL of the API Gateway (without stage)
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayRestApiUrl"
+

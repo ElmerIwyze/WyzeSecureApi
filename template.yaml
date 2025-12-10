@@ -49,6 +49,10 @@ Parameters:
     Type: String
     Default: "*"
     Description: CORS origin for API responses
+  DeploymentTimestamp:
+    Type: String
+    Default: "1"
+    Description: Change this value to force a new API Gateway deployment
 
 Conditions:
   UseCognitoStackImport: !Not [!Equals [!Ref CognitoStackName, ""]]
@@ -74,11 +78,15 @@ Resources:
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
-        Minify: true
+        Minify: false
         Target: "es2020"
         Sourcemap: true
         EntryPoints: 
           - index.ts
+        External:
+          - "@aws-sdk/*"
+          - "jsonwebtoken"
+          - "cookie"
     Properties:
       FunctionName: !Sub "${StackPrefix}-auth-${Environment}"
       CodeUri: src/auth/
@@ -113,7 +121,6 @@ Resources:
                     - UseCognitoStackImport
                     - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
                     - !Ref CognitoUserPoolId
-      AutoPublishAlias: !Ref Environment
 
   AuthFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -121,17 +128,32 @@ Resources:
       LogGroupName: !Sub "/aws/lambda/${StackPrefix}-auth-${Environment}"
       RetentionInDays: 7
 
+  # Primary environment alias - explicitly created so we can reference it in permissions
+  AuthFunctionAliasEnv:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref AuthFunction
+      FunctionVersion: $LATEST
+      Name: !Ref Environment
+      Description: !Sub "Primary alias for ${Environment} environment"
+
   # Lambda Authorizer Function - validates JWT from cookies
   AuthorizerFunction:
     Type: AWS::Serverless::Function
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
-        Minify: true
+        Minify: false
         Target: "es2020"
         Sourcemap: true
         EntryPoints: 
           - index.ts
+        External:
+          - "@aws-sdk/*"
+          - "jsonwebtoken"
+          - "jwks-rsa"
+          - "jwk-to-pem"
+          - "axios"
     Properties:
       FunctionName: !Sub "${StackPrefix}-authorizer-${Environment}"
       CodeUri: src/authorizer/
@@ -147,7 +169,6 @@ Resources:
             - UseCognitoStackImport
             - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
             - !Ref CognitoUserPoolId
-          AWS_REGION: !Ref AWS::Region
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -190,7 +211,263 @@ Resources:
         - ApiId:
             Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
 
+  # ==========================================
+  # Cognito Custom Auth Lambda Triggers
+  # ==========================================
+
+  DefineAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+        External:
+          - "@aws-sdk/*"
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-define-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/define-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Defines the auth challenge flow for custom OTP
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  DefineAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-define-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  DefineAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DefineAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+        - UserPoolId: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
+
+  CreateAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+        External:
+          - "@aws-sdk/*"
+          - "aws-sdk"
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-create-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/create-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Creates and sends the OTP challenge
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: '*'
+
+  CreateAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-create-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  CreateAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+        - UserPoolId: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
+
+  VerifyAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+        External:
+          - "@aws-sdk/*"
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-verify-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/verify-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Verifies the OTP entered by user
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  VerifyAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-verify-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  VerifyAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VerifyAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+        - UserPoolId: !If
+            - UseCognitoStackImport
+            - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+            - !Ref CognitoUserPoolId
+
+  # Update Cognito User Pool with Lambda Triggers
+  UserPoolLambdaConfig:
+    Type: Custom::CognitoUserPoolLambdaConfig
+    DependsOn:
+      - DefineAuthChallengePermission
+      - CreateAuthChallengePermission
+      - VerifyAuthChallengePermission
+    Properties:
+      ServiceToken: !GetAtt UpdateCognitoTriggersFunction.Arn
+      UserPoolId: !If
+        - UseCognitoStackImport
+        - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+        - !Ref CognitoUserPoolId
+      DefineAuthChallenge: !GetAtt DefineAuthChallengeFunction.Arn
+      CreateAuthChallenge: !GetAtt CreateAuthChallengeFunction.Arn
+      VerifyAuthChallengeResponse: !GetAtt VerifyAuthChallengeFunction.Arn
+
+  # Custom Resource Lambda to update Cognito User Pool triggers
+  UpdateCognitoTriggersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-update-cognito-triggers-${Environment}"
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      InlineCode: |
+        const { CognitoIdentityProviderClient, UpdateUserPoolCommand } = require('@aws-sdk/client-cognito-identity-provider');
+        const response = require('cfn-response');
+        
+        exports.handler = async (event, context) => {
+          console.log('Event:', JSON.stringify(event, null, 2));
+          
+          if (event.RequestType === 'Delete') {
+            await response.send(event, context, response.SUCCESS);
+            return;
+          }
+          
+          try {
+            const client = new CognitoIdentityProviderClient({});
+            const params = {
+              UserPoolId: event.ResourceProperties.UserPoolId,
+              LambdaConfig: {
+                DefineAuthChallenge: event.ResourceProperties.DefineAuthChallenge,
+                CreateAuthChallenge: event.ResourceProperties.CreateAuthChallenge,
+                VerifyAuthChallengeResponse: event.ResourceProperties.VerifyAuthChallengeResponse
+              }
+            };
+            
+            await client.send(new UpdateUserPoolCommand(params));
+            await response.send(event, context, response.SUCCESS);
+          } catch (error) {
+            console.error('Error:', error);
+            await response.send(event, context, response.FAILED, { Error: error.message });
+          }
+        };
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:UpdateUserPool
+                - cognito-idp:DescribeUserPool
+              Resource: !Sub
+                - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+                - UserPoolId: !If
+                    - UseCognitoStackImport
+                    - Fn::ImportValue: !Sub "${CognitoStackName}-UserPoolId"
+                    - !Ref CognitoUserPoolId
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  UpdateCognitoTriggersFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-update-cognito-triggers-${Environment}"
+      RetentionInDays: 7
+
+  # ==========================================
   # API Gateway Resources under /secure/auth
+  # ==========================================
+
   AuthResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -217,18 +494,34 @@ Resources:
       ResourceId: !Ref SendOtpResource
       HttpMethod: POST
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: SendOTP
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub
-          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
-          - {}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
         IntegrationResponses:
           - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   SendOtpOptions:
     Type: AWS::ApiGateway::Method
@@ -238,6 +531,8 @@ Resources:
       ResourceId: !Ref SendOtpResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: SendOTPCORS
       Integration:
         Type: MOCK
         PassthroughBehavior: WHEN_NO_MATCH
@@ -246,15 +541,93 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
               method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # /secure/auth/register - Register new user with phone number
+  RegisterResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'register'
+
+  RegisterPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref RegisterResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: RegisterUser
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  RegisterOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref RegisterResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: RegisterUserCORS
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   # /secure/auth/verify-otp - Verify OTP and authenticate
   VerifyOtpResource:
@@ -273,18 +646,34 @@ Resources:
       ResourceId: !Ref VerifyOtpResource
       HttpMethod: POST
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: VerifyOTP
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub
-          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
-          - {}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
         IntegrationResponses:
           - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   VerifyOtpOptions:
     Type: AWS::ApiGateway::Method
@@ -294,6 +683,8 @@ Resources:
       ResourceId: !Ref VerifyOtpResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: VerifyOTPCORS
       Integration:
         Type: MOCK
         PassthroughBehavior: WHEN_NO_MATCH
@@ -302,15 +693,17 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
               method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   # /secure/auth/refresh - Refresh tokens (PROTECTED)
   RefreshResource:
@@ -330,18 +723,38 @@ Resources:
       HttpMethod: POST
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref ApiGatewayAuthorizer
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: RefreshToken
+      RequestParameters:
+        method.request.header.Cookie: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub
-          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
-          - {}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.Cookie: method.request.header.Cookie
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
         IntegrationResponses:
           - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   RefreshOptions:
     Type: AWS::ApiGateway::Method
@@ -351,6 +764,8 @@ Resources:
       ResourceId: !Ref RefreshResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: RefreshTokenCORS
       Integration:
         Type: MOCK
         PassthroughBehavior: WHEN_NO_MATCH
@@ -388,18 +803,38 @@ Resources:
       ResourceId: !Ref LogoutResource
       HttpMethod: POST
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: Logout
+      RequestParameters:
+        method.request.header.Cookie: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub
-          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
-          - {}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.Cookie: method.request.header.Cookie
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
         IntegrationResponses:
           - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   LogoutOptions:
     Type: AWS::ApiGateway::Method
@@ -409,6 +844,8 @@ Resources:
       ResourceId: !Ref LogoutResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: LogoutCORS
       Integration:
         Type: MOCK
         PassthroughBehavior: WHEN_NO_MATCH
@@ -417,15 +854,17 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
               method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   # /secure/auth/me - Get current user (PROTECTED)
   MeResource:
@@ -445,18 +884,38 @@ Resources:
       HttpMethod: GET
       AuthorizationType: CUSTOM
       AuthorizerId: !Ref ApiGatewayAuthorizer
+      ApiKeyRequired: false
+      RequestModels:
+        application/json: Empty
+      OperationName: GetCurrentUser
+      RequestParameters:
+        method.request.header.Cookie: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub
-          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
-          - {}
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.Cookie: method.request.header.Cookie
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
         IntegrationResponses:
           - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
       MethodResponses:
         - StatusCode: 200
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
 
   MeOptions:
     Type: AWS::ApiGateway::Method
@@ -466,6 +925,8 @@ Resources:
       ResourceId: !Ref MeResource
       HttpMethod: OPTIONS
       AuthorizationType: NONE
+      ApiKeyRequired: false
+      OperationName: GetCurrentUserCORS
       Integration:
         Type: MOCK
         PassthroughBehavior: WHEN_NO_MATCH
@@ -487,11 +948,14 @@ Resources:
             method.response.header.Access-Control-Allow-Credentials: true
 
   # API Gateway Deployment - includes all auth methods
+  # DeploymentTimestamp parameter forces CloudFormation to create new deployment
   ApiGatewayDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - SendOtpPost
       - SendOtpOptions
+      - RegisterPost
+      - RegisterOptions
       - VerifyOtpPost
       - VerifyOtpOptions
       - RefreshPost
@@ -500,10 +964,12 @@ Resources:
       - LogoutOptions
       - MeGet
       - MeOptions
+      - AuthFunction
+      - AuthorizerFunction
     Properties:
       RestApiId:
         Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
-      Description: !Sub "Deployment with auth endpoints - ${Environment}"
+      Description: !Sub "Auth deployment ${DeploymentTimestamp} for ${Environment}"
 
   # CloudWatch Role for API Gateway
   ApiGatewayCloudWatchRole:
@@ -531,12 +997,103 @@ Resources:
       LogGroupName: !Sub "/aws/apigateway/${StackPrefix}-${Environment}"
       RetentionInDays: 7
 
+  # Custom Resource to create new deployment and update stage on every stack update
+  UpdateApiGatewayStage:
+    Type: Custom::UpdateStage
+    DependsOn:
+      - SendOtpPost
+      - SendOtpOptions
+      - RegisterPost
+      - RegisterOptions
+      - VerifyOtpPost
+      - VerifyOtpOptions
+      - RefreshPost
+      - RefreshOptions
+      - LogoutPost
+      - LogoutOptions
+      - MeGet
+      - MeOptions
+      - AuthFunction
+      - AuthorizerFunction
+      - ApiGatewayStage
+    Properties:
+      ServiceToken: !GetAtt UpdateStageFunction.Arn
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      StageName: !Ref Environment
+      # DeploymentTimestamp changes on every deploy, triggering the custom resource
+      DeploymentTimestamp: !Ref DeploymentTimestamp
+      Description: !Sub "Auth deployment ${DeploymentTimestamp} for ${Environment}"
+
+  UpdateStageFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-update-stage-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt UpdateStageFunctionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          
+          def handler(event, context):
+              try:
+                  props = event['ResourceProperties']
+                  rest_api_id = props['RestApiId']
+                  stage_name = props['StageName']
+                  description = props.get('Description', 'Deployment')
+                  
+                  if event['RequestType'] in ['Create', 'Update']:
+                      client = boto3.client('apigateway')
+                      
+                      # Create a new deployment
+                      response = client.create_deployment(
+                          restApiId=rest_api_id,
+                          stageName=stage_name,
+                          description=description
+                      )
+                      deployment_id = response['id']
+                      print(f"Created new deployment {deployment_id} for stage {stage_name}")
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {'DeploymentId': deployment_id})
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  UpdateStageFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UpdateStagePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - apigateway:POST
+                  - apigateway:CreateDeployment
+                Resource: !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/*/deployments"
+
   # API Gateway Stage with stage variables for dynamic Lambda routing
   ApiGatewayStage:
     Type: AWS::ApiGateway::Stage
     DependsOn:
       - ApiGatewayAccount
       - ApiGatewayAccessLogGroup
+      - ApiGatewayDeployment
     Properties:
       RestApiId:
         Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
@@ -557,28 +1114,772 @@ Resources:
         Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
 
   # Lambda Permissions for API Gateway to invoke auth function
-  AuthFunctionPermission:
+  # Permission for base function (unqualified invocation)
+  AuthFunctionPermissionBase:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref AuthFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub
-        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/${Environment}/*/*"
-        - ApiId:
-            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
 
-  # Permission for the alias
-  AuthFunctionAliasPermission:
+  # Permission for environment alias
+  AuthFunctionPermission:
     Type: AWS::Lambda::Permission
+    DependsOn: AuthFunctionAliasEnv
     Properties:
-      FunctionName: !Sub "${AuthFunction}:${Environment}"
+      FunctionName: !Ref AuthFunctionAliasEnv
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub
-        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/${Environment}/*/*"
-        - ApiId:
-            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
+
+  # ==========================================
+  # API Gateway Documentation Parts
+  # ==========================================
+
+  # Documentation for /register endpoint
+  RegisterResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/register
+      Properties: |
+        {
+          "description": "Register a new user with phone number and receive OTP for verification"
+        }
+
+  RegisterPostMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/register
+        Method: POST
+      Properties: |
+        {
+          "summary": "Register new user",
+          "description": "Creates a new user account in Cognito with the provided phone number. An OTP will be sent to the phone number for verification. The phone number must be in E.164 format (e.g., +27821234567).",
+          "tags": ["Authentication"],
+          "requestBody": {
+            "description": "User registration details",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["phoneNumber"],
+                  "properties": {
+                    "phoneNumber": {
+                      "type": "string",
+                      "pattern": "^\\+[1-9]\\d{1,14}$",
+                      "description": "Phone number in E.164 format",
+                      "example": "+27821234567"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Optional user display name",
+                      "example": "John Doe"
+                    }
+                  }
+                },
+                "examples": {
+                  "basic": {
+                    "summary": "Basic registration",
+                    "value": {
+                      "phoneNumber": "+27821234567"
+                    }
+                  },
+                  "withName": {
+                    "summary": "Registration with name",
+                    "value": {
+                      "phoneNumber": "+27821234567",
+                      "name": "John Doe"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "User registered successfully, OTP sent",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "example": "User registered successfully. OTP sent to +27821234567"
+                      },
+                      "session": {
+                        "type": "string",
+                        "description": "Session identifier for OTP verification"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request - missing or invalid phone number",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Phone number is required and must be in E.164 format"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "409": {
+              "description": "User already exists",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "User with this phone number already exists"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "500": {
+              "description": "Internal server error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Failed to register user"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  RegisterPostRequestDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: REQUEST_BODY
+        Path: /secure/auth/register
+        Method: POST
+      Properties: |
+        {
+          "description": "Registration request payload with phone number in E.164 format (+CountryCodePhoneNumber)"
+        }
+
+  RegisterPostResponse200Doc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESPONSE
+        Path: /secure/auth/register
+        Method: POST
+        StatusCode: "200"
+      Properties: |
+        {
+          "description": "Successfully registered user and sent OTP. Use the session token with /verify-otp endpoint to complete authentication."
+        }
+
+  # Documentation for /send-otp endpoint
+  SendOtpResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/send-otp
+      Properties: |
+        {
+          "description": "Request a new OTP to be sent to an existing user's phone number"
+        }
+
+  SendOtpPostMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/send-otp
+        Method: POST
+      Properties: |
+        {
+          "summary": "Send OTP to user",
+          "description": "Initiates a custom authentication flow for an existing user and sends an OTP to their registered phone number. Use this endpoint for returning users to sign in.",
+          "tags": ["Authentication"],
+          "requestBody": {
+            "description": "User phone number",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["phoneNumber"],
+                  "properties": {
+                    "phoneNumber": {
+                      "type": "string",
+                      "pattern": "^\\+[1-9]\\d{1,14}$",
+                      "description": "Phone number in E.164 format",
+                      "example": "+27821234567"
+                    }
+                  }
+                },
+                "example": {
+                  "phoneNumber": "+27821234567"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "OTP sent successfully",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "example": "OTP sent successfully"
+                      },
+                      "session": {
+                        "type": "string",
+                        "description": "Session identifier for OTP verification"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid phone number format",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Phone number is required and must be in E.164 format"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "404": {
+              "description": "User not found",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "User not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  # Documentation for /verify-otp endpoint
+  VerifyOtpResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/verify-otp
+      Properties: |
+        {
+          "description": "Verify the OTP code and complete authentication"
+        }
+
+  VerifyOtpPostMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/verify-otp
+        Method: POST
+      Properties: |
+        {
+          "summary": "Verify OTP code",
+          "description": "Verifies the OTP code sent to the user's phone. On success, returns JWT access and refresh tokens via secure HttpOnly cookies. The access token is valid for 1 hour, refresh token for 30 days.",
+          "tags": ["Authentication"],
+          "requestBody": {
+            "description": "OTP verification details",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["phoneNumber", "otp", "session"],
+                  "properties": {
+                    "phoneNumber": {
+                      "type": "string",
+                      "pattern": "^\\+[1-9]\\d{1,14}$",
+                      "description": "Phone number in E.164 format",
+                      "example": "+27821234567"
+                    },
+                    "otp": {
+                      "type": "string",
+                      "pattern": "^\\d{6}$",
+                      "description": "6-digit OTP code received via SMS",
+                      "example": "123456"
+                    },
+                    "session": {
+                      "type": "string",
+                      "description": "Session token from send-otp or register response"
+                    }
+                  }
+                },
+                "example": {
+                  "phoneNumber": "+27821234567",
+                  "otp": "123456",
+                  "session": "AYABeF..."
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "OTP verified successfully, authentication tokens set in cookies",
+              "headers": {
+                "Set-Cookie": {
+                  "description": "HttpOnly secure cookies containing accessToken and refreshToken",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              },
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "example": "Authentication successful"
+                      },
+                      "user": {
+                        "type": "object",
+                        "properties": {
+                          "phoneNumber": {
+                            "type": "string",
+                            "example": "+27821234567"
+                          },
+                          "sub": {
+                            "type": "string",
+                            "description": "User unique identifier"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Invalid request or OTP",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Invalid OTP code"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "OTP verification failed",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Invalid or expired OTP"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  # Documentation for /refresh endpoint
+  RefreshResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/refresh
+      Properties: |
+        {
+          "description": "Refresh access token using refresh token from cookie"
+        }
+
+  RefreshPostMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/refresh
+        Method: POST
+      Properties: |
+        {
+          "summary": "Refresh access token",
+          "description": "Exchanges a valid refresh token for a new access token. The refresh token is automatically read from the HttpOnly cookie. Returns a new access token in a cookie.",
+          "tags": ["Authentication"],
+          "parameters": [
+            {
+              "name": "Cookie",
+              "in": "header",
+              "required": true,
+              "description": "Must include refreshToken cookie",
+              "schema": {
+                "type": "string",
+                "example": "refreshToken=eyJraWQ..."
+              }
+            }
+          ],
+          "requestBody": {
+            "description": "Empty body (tokens read from cookies)",
+            "required": false,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Token refreshed successfully",
+              "headers": {
+                "Set-Cookie": {
+                  "description": "New accessToken in HttpOnly secure cookie",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              },
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "example": "Token refreshed successfully"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Missing or invalid refresh token",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Refresh token not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  # Documentation for /logout endpoint
+  LogoutResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/logout
+      Properties: |
+        {
+          "description": "Log out user and clear authentication cookies"
+        }
+
+  LogoutPostMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/logout
+        Method: POST
+      Properties: |
+        {
+          "summary": "Logout user",
+          "description": "Logs out the current user by revoking their refresh token in Cognito and clearing all authentication cookies. The user will need to re-authenticate with OTP to access protected resources.",
+          "tags": ["Authentication"],
+          "parameters": [
+            {
+              "name": "Cookie",
+              "in": "header",
+              "required": true,
+              "description": "Must include accessToken cookie for authentication",
+              "schema": {
+                "type": "string",
+                "example": "accessToken=eyJraWQ..."
+              }
+            }
+          ],
+          "requestBody": {
+            "description": "Empty body (authentication from cookies)",
+            "required": false,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Logout successful, cookies cleared",
+              "headers": {
+                "Set-Cookie": {
+                  "description": "Expired cookies to clear authentication",
+                  "schema": {
+                    "type": "string"
+                  }
+                }
+              },
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "example": "Logout successful"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Not authenticated",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Access token not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  # Documentation for /me endpoint
+  MeResourceDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: RESOURCE
+        Path: /secure/auth/me
+      Properties: |
+        {
+          "description": "Get current authenticated user information"
+        }
+
+  MeGetMethodDoc:
+    Type: AWS::ApiGateway::DocumentationPart
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Location:
+        Type: METHOD
+        Path: /secure/auth/me
+        Method: GET
+      Properties: |
+        {
+          "summary": "Get current user",
+          "description": "Retrieves the profile information of the currently authenticated user. Requires a valid access token in cookies.",
+          "tags": ["User"],
+          "parameters": [
+            {
+              "name": "Cookie",
+              "in": "header",
+              "required": true,
+              "description": "Must include accessToken cookie for authentication",
+              "schema": {
+                "type": "string",
+                "example": "accessToken=eyJraWQ..."
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "User information retrieved successfully",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "sub": {
+                        "type": "string",
+                        "description": "User unique identifier (UUID)",
+                        "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      },
+                      "phone_number": {
+                        "type": "string",
+                        "description": "User's phone number in E.164 format",
+                        "example": "+27821234567"
+                      },
+                      "phone_number_verified": {
+                        "type": "boolean",
+                        "description": "Whether phone number is verified",
+                        "example": true
+                      },
+                      "name": {
+                        "type": "string",
+                        "description": "User's display name (if provided during registration)",
+                        "example": "John Doe"
+                      }
+                    }
+                  },
+                  "example": {
+                    "sub": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "phone_number": "+27821234567",
+                    "phone_number_verified": true,
+                    "name": "John Doe"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Not authenticated or token expired",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "string",
+                        "example": "Access token not found or invalid"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+  # Documentation Version
+  ApiDocumentationVersion:
+    Type: AWS::ApiGateway::DocumentationVersion
+    DependsOn:
+      - RegisterResourceDoc
+      - RegisterPostMethodDoc
+      - RegisterPostRequestDoc
+      - RegisterPostResponse200Doc
+      - SendOtpResourceDoc
+      - SendOtpPostMethodDoc
+      - VerifyOtpResourceDoc
+      - VerifyOtpPostMethodDoc
+      - RefreshResourceDoc
+      - RefreshPostMethodDoc
+      - LogoutResourceDoc
+      - LogoutPostMethodDoc
+      - MeResourceDoc
+      - MeGetMethodDoc
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      DocumentationVersion: !Sub "v1-${Environment}-${AWS::StackName}"
+      Description: !Sub "API Documentation for ${Environment} environment - Authentication endpoints with OTP flow"
 
 Outputs:
   ApiGatewayUrl:
@@ -589,6 +1890,13 @@ Outputs:
           Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
     Export:
       Name: !Sub "${AWS::StackName}-ApiGatewayUrl"
+
+  RegisterEndpoint:
+    Description: Register new user endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/secure/auth/register"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
 
   SendOtpEndpoint:
     Description: Send OTP endpoint

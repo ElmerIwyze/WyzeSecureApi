@@ -1,0 +1,1194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Auditron Core Application - Shared infrastructure, proxy routing, and secret management
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: nodejs22.x
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        STACK_PREFIX: !Ref StackPrefix
+        ENVIRONMENT: !Ref Environment
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+    Tags:
+      Project: Auditron
+      Environment: !Ref Environment
+      Application: Core
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: auditron
+    Description: Prefix for resource names to avoid conflicts
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  CognitoStackName:
+    Type: String
+    Default: "auditron-cognito"
+    Description: Name of the Cognito CloudFormation stack (without environment suffix)
+  SharedApiStackName:
+    Type: String
+    Default: "auditron-shared-api"
+    Description: Name of the shared API Gateway CloudFormation stack
+  CorsOrigin:
+    Type: String
+    Default: "*"
+    Description: CORS origin for API responses (set to specific domain in production)
+
+Resources:
+  # Shared DynamoDB Tables
+  ComplianceLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${StackPrefix}-Compliance-Logs-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: ScanId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ScanId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  ConfigurationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${StackPrefix}-Configurations-${Environment}"
+      AttributeDefinitions:
+        - AttributeName: ConfigId
+          AttributeType: S
+        - AttributeName: RegulationType
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ConfigId
+          KeyType: HASH
+        - AttributeName: RegulationType
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Shared Messaging Infrastructure
+  FixQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${StackPrefix}-Compliance-FixQueue-${Environment}"
+      VisibilityTimeout: 180  # 3x the Lambda timeout (60s)
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  ComplianceAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${StackPrefix}-Compliance-Alerts-${Environment}"
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Secrets Management - Single secret per environment
+  EnvironmentSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${StackPrefix}/${Environment}"
+      Description: !Sub "All secrets for ${StackPrefix} ${Environment} environment"
+      SecretString: !Sub |
+        {
+          "openai_apikey": "your-openai-key-here",
+          "google_client_id": "1052428926414-t92m635j6rsupgft0cbnmv8nd9odl2sc.apps.googleusercontent.com",
+          "google_client_secret": "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",
+          "facebook_app_id": "your-facebook-app-id-here",
+          "facebook_app_secret": "your-facebook-app-secret-here",
+          "amazon_client_id": "your-amazon-client-id-here",
+          "amazon_client_secret": "your-amazon-client-secret-here",
+          "cognito_client_id": "134febuoe79jstndb2jd5krbi8",
+          "cognito_client_secret": "your-cognito-client-secret-here"
+        }
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Core Functions
+  SecretRotationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-core-secret-rotation-${Environment}"
+      CodeUri: ../../../src/core/secret-rotation/aws/
+      Handler: index.handler
+      Description: Rotate secrets in AWS Secrets Manager
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:UpdateSecret
+                - secretsmanager:GetSecretValue
+                - secretsmanager:PutSecretValue
+                - secretsmanager:DescribeSecret
+              Resource: !Ref EnvironmentSecret
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref EnvironmentSecret
+      AutoPublishAlias: !Ref Environment
+      Tags:
+        Application: Core
+
+  SecretRotationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-core-secret-rotation-${Environment}"
+      RetentionInDays: 1
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Additional aliases for blue-green deployment - use $LATEST for now, dev uses AutoPublishAlias
+  SecretRotationFunctionAliasGreen:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref SecretRotationFunction
+      FunctionVersion: $LATEST
+      Name: green
+      Description: Green alias for blue-green deployment
+
+  SecretRotationFunctionAliasBlue:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref SecretRotationFunction
+      FunctionVersion: $LATEST
+      Name: blue
+      Description: Blue alias for blue-green deployment
+
+  ProxyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-core-proxy-${Environment}"
+      CodeUri: ../../../src/core/proxy/
+      Handler: index.handler
+      Description: Multi-cloud proxy for routing compliance and auth requests
+      Environment:
+        Variables:
+          COGNITO_STACK_NAME: !Ref CognitoStackName
+          COGNITO_USER_POOL_ID: 
+            Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-UserPoolId"
+          COGNITO_APP_CLIENT_ID:
+            Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-UserPoolClientId"
+          CORS_ORIGIN: !Ref CorsOrigin
+          # Authentication function registry
+          AUTH_COGNITO_FUNCTION: !Ref AuthCognitoFunction
+          # AWS compliance function registry - will be populated by provider stacks
+          AWS_S3_COMPLIANCE_SCAN_FUNCTION: !Sub "${StackPrefix}-aws-s3-compliance-scan-${Environment}"
+          AWS_S3_COMPLIANCE_FIX_FUNCTION: !Sub "${StackPrefix}-aws-s3-compliance-fix-${Environment}"
+          AWS_S3_COMPLIANCE_STATUS_FUNCTION: !Sub "${StackPrefix}-aws-s3-compliance-status-${Environment}"
+          AWS_COMPLIANCE_HISTORY_FUNCTION: !Sub "${StackPrefix}-aws-compliance-history-${Environment}"
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: 
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackPrefix}-*"
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${StackPrefix}-*:*"
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource: 
+                - !GetAtt ComplianceLogsTable.Arn
+                - !GetAtt ConfigurationsTable.Arn
+
+      # Removed AutoPublishAlias - we'll create the alias explicitly below
+      Tags:
+        Application: Core
+
+  ProxyFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-core-proxy-${Environment}"
+      RetentionInDays: 1
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Additional aliases for blue-green deployment - use $LATEST for now, dev uses AutoPublishAlias
+  # Primary environment alias - explicitly created so we can reference it in permissions
+  ProxyFunctionAliasEnv:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ProxyFunction
+      FunctionVersion: $LATEST
+      Name: !Ref Environment
+      Description: !Sub "Primary alias for ${Environment} environment"
+
+  ProxyFunctionAliasGreen:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ProxyFunction
+      FunctionVersion: $LATEST
+      Name: green
+      Description: Green alias for blue-green deployment
+
+  ProxyFunctionAliasBlue:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref ProxyFunction
+      FunctionVersion: $LATEST
+      Name: blue
+      Description: Blue alias for blue-green deployment
+
+  # Authentication Function - handles authentication (currently Cognito-based)
+  AuthCognitoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-auth-cognito-${Environment}"
+      CodeUri: ../../../src/auth/
+      Handler: index.handler
+      Description: Handles authentication (login, register, OAuth) via Cognito
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: 
+            Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-UserPoolId"
+          COGNITO_APP_CLIENT_ID:
+            Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-UserPoolClientId"
+          COGNITO_DOMAIN:
+            Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-HostedUIURL"
+          CORS_ORIGIN: !Ref CorsOrigin
+          ENVIRONMENT_SECRET_ARN: !Ref EnvironmentSecret
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminInitiateAuth
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminSetUserPassword
+                - cognito-idp:AdminGetUser
+                - cognito-idp:InitiateAuth
+                - cognito-idp:SignUp
+                - cognito-idp:ConfirmSignUp
+                - cognito-idp:ResendConfirmationCode
+                - cognito-idp:ForgotPassword
+                - cognito-idp:ConfirmForgotPassword
+                - cognito-idp:GetUser
+                - cognito-idp:GlobalSignOut
+                - cognito-idp:ListUsers
+              Resource: 
+                Fn::Sub:
+                  - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+                  - UserPoolId:
+                      Fn::ImportValue: !Sub "${CognitoStackName}-${Environment}-UserPoolId"
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref EnvironmentSecret
+      AutoPublishAlias: !Ref Environment
+      Tags:
+        Application: Core
+        Component: AuthCognito
+
+  AuthCognitoFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-auth-cognito-${Environment}"
+      RetentionInDays: 1
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+        - Key: Component
+          Value: AuthCognito
+
+  # Additional aliases for blue-green deployment
+  AuthCognitoFunctionAliasGreen:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref AuthCognitoFunction
+      FunctionVersion: $LATEST
+      Name: green
+      Description: Green alias for blue-green deployment
+
+  AuthCognitoFunctionAliasBlue:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref AuthCognitoFunction
+      FunctionVersion: $LATEST
+      Name: blue
+      Description: Blue alias for blue-green deployment
+
+  # ============================================================================
+  # Authentication Endpoint Resources - /proxy/auth tree
+  # ============================================================================
+  
+  # /proxy/auth
+  AuthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ProxyResourceId"
+      PathPart: 'auth'
+
+  # /proxy/auth/login
+  AuthLoginResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'login'
+
+  # /proxy/auth/register
+  AuthRegisterResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'register'
+
+  # /proxy/auth/logout
+  AuthLogoutResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'logout'
+
+  # /proxy/auth/me
+  AuthMeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'me'
+
+  # /proxy/auth/google-url
+  AuthGoogleUrlResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'google-url'
+
+  # /proxy/auth/exchange-code
+  AuthExchangeCodeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'exchange-code'
+
+  # ============================================================================
+  # Authentication Methods - POST/GET with stage variable integrations
+  # ============================================================================
+
+  # POST /proxy/auth/login
+  AuthLoginPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthLoginResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/login (CORS)
+  AuthLoginOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthLoginResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # POST /proxy/auth/register
+  AuthRegisterPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthRegisterResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/register (CORS)
+  AuthRegisterOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthRegisterResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # POST /proxy/auth/logout
+  AuthLogoutPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthLogoutResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.header.Cookie: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.Cookie: method.request.header.Cookie
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/logout (CORS)
+  AuthLogoutOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthLogoutResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # GET /proxy/auth/me
+  AuthMeGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthMeResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.header.Cookie: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        RequestParameters:
+          integration.request.header.Cookie: method.request.header.Cookie
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/me (CORS)
+  AuthMeOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthMeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # POST /proxy/auth/google-url
+  AuthGoogleUrlPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthGoogleUrlResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/google-url (CORS)
+  AuthGoogleUrlOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthGoogleUrlResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # POST /proxy/auth/exchange-code
+  AuthExchangeCodePost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthExchangeCodeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        Uri: !Join
+          - ""
+          - - "arn:aws:apigateway:"
+            - !Ref AWS::Region
+            - ":lambda:path/2015-03-31/functions/arn:aws:lambda:"
+            - !Ref AWS::Region
+            - ":"
+            - !Ref AWS::AccountId
+            - ":function:${stageVariables.stackPrefix}-core-proxy-${stageVariables.environment}:${stageVariables.alias}/invocations"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # OPTIONS /proxy/auth/exchange-code (CORS)
+  AuthExchangeCodeOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref AuthExchangeCodeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # ============================================================================
+  # Core API Gateway Deployment and Stage
+  # ============================================================================
+  
+  # Create new deployment that includes auth methods + base methods
+  CoreApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      # Auth methods
+      - AuthLoginPost
+      - AuthLoginOptions
+      - AuthRegisterPost
+      - AuthRegisterOptions
+      - AuthLogoutPost
+      - AuthLogoutOptions
+      - AuthMeGet
+      - AuthMeOptions
+      - AuthGoogleUrlPost
+      - AuthGoogleUrlOptions
+      - AuthExchangeCodePost
+      - AuthExchangeCodeOptions
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Description: !Sub "Core deployment with auth methods for ${Environment} environment - Updated POST google-url with logging"
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackPrefix}-apigateway-cloudwatch-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiGatewayCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${StackPrefix}-core-${Environment}"
+      RetentionInDays: 1
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  ApiGatewayExecutionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub:
+          - "API-Gateway-Execution-Logs_${ApiId}/${Environment}"
+          - ApiId:
+              Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      RetentionInDays: 1
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # API Gateway Stage (references shared API Gateway)
+  # Uses the new core deployment that includes auth methods + base methods
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - ApiGatewayAccount
+      - ApiGatewayAccessLogGroup
+      - ApiGatewayExecutionLogGroup
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      DeploymentId: !Ref CoreApiGatewayDeployment
+      StageName: !Ref Environment
+      Variables:
+        environment: !Ref Environment
+        stackPrefix: !Ref StackPrefix
+        alias: !Ref Environment
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          LoggingLevel: INFO
+          MetricsEnabled: true
+          DataTraceEnabled: false
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Lambda Permissions for API Gateway - one for each alias for blue-green deployment
+  # Permission for base function (unqualified invocation)
+  ProxyFunctionPermissionBase:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProxyFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
+
+  # Permission for dev/environment alias
+  ProxyFunctionPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: ProxyFunctionAliasEnv
+    Properties:
+      FunctionName: !Ref ProxyFunctionAliasEnv
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
+
+  # Permission for green alias
+  ProxyFunctionPermissionGreen:
+    Type: AWS::Lambda::Permission
+    DependsOn: ProxyFunctionAliasGreen
+    Properties:
+      FunctionName: !Ref ProxyFunctionAliasGreen
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
+
+  # Permission for blue alias
+  ProxyFunctionPermissionBlue:
+    Type: AWS::Lambda::Permission
+    DependsOn: ProxyFunctionAliasBlue
+    Properties:
+      FunctionName: !Ref ProxyFunctionAliasBlue
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join
+        - ""
+        - - "arn:aws:execute-api:"
+          - !Ref AWS::Region
+          - ":"
+          - !Ref AWS::AccountId
+          - ":"
+          - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          - "/"
+          - !Ref Environment
+          - "/*/*"
+
+
+
+  # API Security - Consolidated from separate API security stack
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub "${StackPrefix}-api-key-${Environment}"
+      Description: API Key for Auditron GDPR compliance proxy endpoint
+      Enabled: true
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+  # Link API Key to environment Usage Plan
+  ApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiUsagePlan
+
+  # Create environment-specific Usage Plan that references shared API Gateway
+  # Each environment gets its own Usage Plan for better isolation
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiGatewayStage
+    Properties:
+      UsagePlanName: !Sub "${StackPrefix}-usage-plan-${Environment}"
+      Description: !Sub "Usage plan for ${Environment} environment"
+      ApiStages:
+        - ApiId:
+            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+          Stage: !Ref Environment
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 25
+      Tags:
+        - Key: Project
+          Value: Auditron
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: Core
+
+Outputs:
+  # Shared Resources
+  ComplianceLogsTableName:
+    Description: Name of the compliance logs DynamoDB table
+    Value: !Ref ComplianceLogsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-ComplianceLogsTableName"
+
+  ComplianceLogsTableArn:
+    Description: ARN of the compliance logs DynamoDB table
+    Value: !GetAtt ComplianceLogsTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ComplianceLogsTableArn"
+
+  ConfigurationsTableName:
+    Description: Name of the configurations DynamoDB table
+    Value: !Ref ConfigurationsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-ConfigurationsTableName"
+
+  ConfigurationsTableArn:
+    Description: ARN of the configurations DynamoDB table
+    Value: !GetAtt ConfigurationsTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ConfigurationsTableArn"
+
+  FixQueueUrl:
+    Description: URL of the fix queue
+    Value: !Ref FixQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-FixQueueUrl"
+
+  FixQueueArn:
+    Description: ARN of the fix queue
+    Value: !GetAtt FixQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FixQueueArn"
+
+  ComplianceAlertTopicArn:
+    Description: ARN of the compliance alert topic
+    Value: !Ref ComplianceAlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-ComplianceAlertTopicArn"
+
+  EnvironmentSecretArn:
+    Description: ARN of the environment secret
+    Value: !Ref EnvironmentSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-EnvironmentSecretArn"
+
+  # API Gateway
+  ApiGatewayUrl:
+    Description: URL of the API Gateway stage
+    Value: !Join
+      - ""
+      - - Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+        - "/"
+        - !Ref Environment
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayUrl"
+
+  ApiGatewayId:
+    Description: ID of the shared API Gateway
+    Value:
+      Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayId"
+
+  ApiGatewayStageName:
+    Description: Name of the API Gateway stage for this environment
+    Value: !Ref Environment
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayStageName"
+
+  # Core Functions
+  ProxyFunctionArn:
+    Description: ARN of the proxy function
+    Value: !GetAtt ProxyFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ProxyFunctionArn"
+
+  SecretRotationFunctionArn:
+    Description: ARN of the secret rotation function
+    Value: !GetAtt SecretRotationFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretRotationFunctionArn"
+
+  AuthCognitoFunctionArn:
+    Description: ARN of the authentication function
+    Value: !GetAtt AuthCognitoFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthCognitoFunctionArn"
+
+  # API Security Outputs - Consolidated from separate API security stack
+  ApiKeyId:
+    Description: API Key ID for accessing the compliance proxy endpoint
+    Value: !Ref ApiKey
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiKeyId"
+
+  ApiUsagePlanId:
+    Description: Usage Plan ID for the compliance API
+    Value: !Ref ApiUsagePlan
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUsagePlanId"
+
+  ApiKeyValueCommand:
+    Description: Command to retrieve API Key value using AWS CLI
+    Value: !Sub "aws apigateway get-api-key --api-key ${ApiKey} --include-value --query 'value' --output text"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiKeyValueCommand"

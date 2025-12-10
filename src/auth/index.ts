@@ -9,6 +9,9 @@ import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
   RespondToAuthChallengeCommand,
+  SignUpCommand,
+  GlobalSignOutCommand,
+  GetUserCommand,
   InitiateAuthCommandInput,
   RespondToAuthChallengeCommandInput
 } from '@aws-sdk/client-cognito-identity-provider';
@@ -22,6 +25,11 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 
 // Types
+interface RegisterBody {
+  phoneNumber: string;
+  name?: string;
+}
+
 interface SendOtpBody {
   phoneNumber: string;
 }
@@ -77,7 +85,9 @@ export const handler = async (
     const cookies = event.headers?.Cookie || event.headers?.cookie || '';
 
     // Route based on endpoint
-    if (path.includes('/send-otp')) {
+    if (path.includes('/register')) {
+      return await registerUser(body);
+    } else if (path.includes('/send-otp')) {
       return await sendOtp(body);
     } else if (path.includes('/verify-otp')) {
       return await verifyOtp(body);
@@ -107,6 +117,122 @@ export const handler = async (
     };
   }
 };
+
+/**
+ * Register a new user
+ * Creates user in Cognito and initiates OTP flow
+ */
+async function registerUser(body: RegisterBody): Promise<APIGatewayProxyResult> {
+  const { phoneNumber, name } = body;
+
+  if (!phoneNumber) {
+    return {
+      statusCode: 400,
+      headers: corsHeaders,
+      body: JSON.stringify({ error: 'Phone number is required' })
+    };
+  }
+
+  // Validate phone number format (E.164 format: +1234567890)
+  const phoneRegex = /^\+[1-9]\d{1,14}$/;
+  if (!phoneRegex.test(phoneNumber)) {
+    return {
+      statusCode: 400,
+      headers: corsHeaders,
+      body: JSON.stringify({
+        error: 'Invalid phone number format. Use E.164 format (e.g., +12345678900)'
+      })
+    };
+  }
+
+  try {
+    // Create user in Cognito
+    const signUpParams = {
+      ClientId: COGNITO_CLIENT_ID,
+      Username: phoneNumber,
+      Password: generateTemporaryPassword(), // Cognito requires password even for custom auth
+      UserAttributes: [
+        {
+          Name: 'phone_number',
+          Value: phoneNumber
+        },
+        ...(name ? [{
+          Name: 'name',
+          Value: name
+        }] : [])
+      ]
+    };
+
+    const signUpCommand = new SignUpCommand(signUpParams);
+    await cognitoClient.send(signUpCommand);
+
+    // Now initiate OTP flow
+    const commandInput: InitiateAuthCommandInput = {
+      AuthFlow: 'CUSTOM_AUTH',
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: {
+        USERNAME: phoneNumber
+      }
+    };
+
+    const command = new InitiateAuthCommand(commandInput);
+    const response = await cognitoClient.send(command);
+
+    return {
+      statusCode: 200,
+      headers: corsHeaders,
+      body: JSON.stringify({
+        message: `Registration initiated. OTP sent to ${phoneNumber}. Please verify OTP to complete registration.`,
+        session: response.Session,
+        challengeName: response.ChallengeName
+      })
+    };
+
+  } catch (error) {
+    console.error('Register user error:', error);
+
+    // Check if user already exists
+    if (error && typeof error === 'object' && 'name' in error && error.name === 'UsernameExistsException') {
+      return {
+        statusCode: 409,
+        headers: corsHeaders,
+        body: JSON.stringify({ error: 'User with this phone number already exists' })
+      };
+    }
+
+    return {
+      statusCode: 500,
+      headers: corsHeaders,
+      body: JSON.stringify({
+        error: 'Failed to register user',
+        message: error instanceof Error ? error.message : String(error)
+      })
+    };
+  }
+}
+
+/**
+ * Generate a temporary password for Cognito signup
+ * (Not used by user, only for Cognito requirement)
+ */
+function generateTemporaryPassword(): string {
+  const length = 16;
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+  let password = '';
+  
+  // Ensure password meets Cognito requirements
+  password += 'A'; // Uppercase
+  password += 'a'; // Lowercase
+  password += '1'; // Number
+  password += '!'; // Special char
+  
+  // Fill rest randomly
+  for (let i = 4; i < length; i++) {
+    password += charset.charAt(Math.floor(Math.random() * charset.length));
+  }
+  
+  return password;
+}
 
 /**
  * Send OTP to phone number

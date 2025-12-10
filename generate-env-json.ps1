@@ -82,23 +82,20 @@ $envConfig = @{
 $jsonContent = $envConfig | ConvertTo-Json -Depth 10
 
 # Write to file
-$envConfig | ConvertTo-Json -Depth 10 | Out-File -FilePath "env.json" -Encoding utf8
+$envConfig | ConvertTo-Json -Depth 10 | Out-File -FilePath "env.json" -Encoding ascii -NoNewline
+"" | Out-File -FilePath "env.json" -Encoding ascii -Append
 
-Write-Host "✅ Created env.json for local testing" -ForegroundColor Green
+Write-Host "Created env.json for local testing" -ForegroundColor Green
 Write-Host "`nFile contents:" -ForegroundColor Cyan
 Write-Host $jsonContent -ForegroundColor Gray
 
-Write-Host "`n📝 Next steps:" -ForegroundColor Cyan
-Write-Host @"
+Write-Host "`nNext steps:" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "1. Start local API:" -ForegroundColor Gray
+Write-Host "   sam local start-api --env-vars env.json --port 3001" -ForegroundColor Gray
+Write-Host ""
+Write-Host "2. Test endpoints:" -ForegroundColor Gray
+Write-Host '   curl -X POST http://localhost:3001/secure/auth/send-otp -H "Content-Type: application/json" -d ''{"phoneNumber":"+12345678900"}''' -ForegroundColor Gray
+Write-Host ""
 
-1. Start local API:
-   sam local start-api --env-vars env.json --port 3001
-
-2. Test endpoints:
-   curl -X POST http://localhost:3001/secure/auth/send-otp \
-     -H "Content-Type: application/json" \
-     -d '{"phoneNumber":"+12345678900"}'
-
-"@ -ForegroundColor Gray
-
-Write-Host "✅ Ready for local testing!`n" -ForegroundColor Green
+Write-Host "Ready for local testing" -ForegroundColor Green

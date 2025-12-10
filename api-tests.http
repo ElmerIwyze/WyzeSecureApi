@@ -1,0 +1,360 @@
+###############################################
+# WyzeSecure API Tests - Complete Flow
+# Using REST Client Extension
+###############################################
+# 
+# 🔐 AUTHENTICATION FLOW EXPLAINED:
+# 
+# NEW USER REGISTRATION (3-step process):
+# ┌─────────────────────────────────────────────────────────────┐
+# │ 1. POST /register                                           │
+# │    → Creates user in Cognito with UNCONFIRMED status        │
+# │    → Sends OTP code (check CloudWatch logs in dev)          │
+# │    → Returns session token                                  │
+# │                                                             │
+# │ 2. POST /verify-otp (with OTP from step 1)                 │
+# │    → Verifies the OTP code                                  │
+# │    → Changes user status: UNCONFIRMED → CONFIRMED           │
+# │    → Returns auth tokens (idToken, refreshToken as cookies) │
+# │    ✅ REGISTRATION NOW COMPLETE - user can access app       │
+# │                                                             │
+# │ 3. GET /me (or any protected endpoint)                     │
+# │    → Uses idToken cookie automatically                      │
+# │    → Returns user profile data                              │
+# └─────────────────────────────────────────────────────────────┘
+# 
+# RETURNING USER LOGIN (2-step process):
+# ┌─────────────────────────────────────────────────────────────┐
+# │ 1. POST /send-otp                                           │
+# │    → User already CONFIRMED in Cognito                      │
+# │    → Sends OTP code                                         │
+# │    → Returns session token                                  │
+# │                                                             │
+# │ 2. POST /verify-otp (with OTP from step 1)                 │
+# │    → Verifies the OTP code                                  │
+# │    → Returns auth tokens (idToken, refreshToken as cookies) │
+# │    ✅ LOGIN COMPLETE - user authenticated                   │
+# └─────────────────────────────────────────────────────────────┘
+# 
+# Instructions:
+# 1. Click "Send Request" above each request to execute
+# 2. Follow the test sequence in order (1-6)
+# 3. Copy values from responses into subsequent requests where indicated
+# 4. All cookies are automatically managed by REST Client
+#
+# Base URL for dev environment
+@baseUrl = https://8k1cvewwmg.execute-api.eu-west-1.amazonaws.com/dev
+@phoneNumber = +27826353316
+
+###############################################
+# TEST 1: Register New User
+###############################################
+# 📝 What happens:
+# - Creates user in Cognito with status: UNCONFIRMED
+# - Generates and sends OTP (check CloudWatch logs: /aws/lambda/wyzesecure-create-auth-challenge-dev)
+# - Returns session token for next step
+#
+# ⚠️ IMPORTANT: User is NOT fully registered yet!
+# - User exists in Cognito but cannot login until OTP is verified
+# - Must complete TEST 3 to confirm user and finish registration
+#
+# @name register
+POST {{baseUrl}}/secure/auth/register
+Content-Type: application/json
+
+{
+  "phoneNumber": "{{phoneNumber}}",
+  "name": "Elmer Botha"
+}
+
+###
+# Expected Response (200):
+# {
+#   "message": "Registration initiated. OTP sent to +27826353316. Please verify OTP to complete registration.",
+#   "session": "AYABeF...",
+#   "challengeName": "CUSTOM_CHALLENGE"
+# }
+#
+# 📋 Next Steps:
+# 1. Check CloudWatch logs for OTP: aws logs tail /aws/lambda/wyzesecure-create-auth-challenge-dev --follow
+# 2. COPY the 'session' value for TEST 3
+# 3. Go to TEST 3 to verify OTP and complete registration
+#
+# 🔍 Verify user status (should be UNCONFIRMED):
+# aws cognito-idp list-users --user-pool-id eu-west-1_D4o7fC9YF --query 'Users[?Attributes[?Name==`phone_number` && Value==`+27826353316`]].[Username,UserStatus]' --output table
+###
+
+
+###############################################
+# TEST 2: Send OTP (Returning User)
+###############################################
+# 📝 What happens:
+# - User already exists in Cognito with status: CONFIRMED
+# - Generates and sends new OTP for login
+# - Returns session token for verification
+#
+# ⚠️ Use this ONLY for users who have already completed registration
+# For NEW users, use TEST 1 instead
+#
+# @name sendOtp
+POST {{baseUrl}}/secure/auth/send-otp
+Content-Type: application/json
+
+{
+  "phoneNumber": "{{phoneNumber}}"
+}
+
+###
+# Expected Response (200):
+# {
+#   "message": "OTP sent successfully",
+#   "session": "AYABeF...",
+#   "challengeName": "CUSTOM_CHALLENGE"
+# }
+#
+# Expected Error (404) if user doesn't exist:
+# {
+#   "error": "User not found"
+# }
+#
+# 📋 Next Steps:
+# 1. Check CloudWatch logs for OTP
+# 2. COPY the 'session' value for TEST 3
+###
+
+
+###############################################
+# TEST 3: Verify OTP
+###############################################
+# 📝 What happens:
+# 
+# FOR NEW USERS (from TEST 1):
+# - Verifies the OTP code
+# - Changes user status: UNCONFIRMED → CONFIRMED
+# - Returns authentication tokens (idToken, refreshToken)
+# - Sets HttpOnly cookies automatically
+# ✅ REGISTRATION IS NOW COMPLETE!
+#
+# FOR RETURNING USERS (from TEST 2):
+# - Verifies the OTP code
+# - Returns authentication tokens
+# - Sets HttpOnly cookies automatically
+# ✅ LOGIN IS NOW COMPLETE!
+#
+# ⚠️ REQUIRED: 
+# 1. Get the OTP code from CloudWatch logs:
+#    aws logs tail /aws/lambda/wyzesecure-create-auth-challenge-dev --follow
+# 2. Replace 'session' value with actual session from TEST 1 or TEST 2
+# 3. Replace 'otp' value with the actual 6-digit OTP code
+#
+# @name verifyOtp
+POST {{baseUrl}}/secure/auth/verify-otp
+Content-Type: application/json
+
+{
+  "phoneNumber": "{{phoneNumber}}",
+  "otp": "123456",
+  "session": "SESSION_FROM_STEP_1_OR_2"
+}
+
+###
+# Expected Response (200):
+# {
+#   "success": true,
+#   "message": "Authentication successful",
+#   "user": {
+#     "sub": "a1b2c3d4-...",
+#     "phone_number": "+27826353316",
+#     "name": "Elmer Botha",
+#     "phone_number_verified": true
+#   }
+# }
+#
+# Expected Error (401) if OTP is wrong:
+# {
+#   "error": "Invalid OTP code"
+# }
+#
+# ✅ Cookies Set Automatically:
+# - idToken: Used for authentication in protected endpoints (15 min expiry)
+# - refreshToken: Used to get new idToken when it expires (30 days expiry)
+# - Both are HttpOnly, Secure, SameSite=None
+#
+# 🔍 Verify user status changed to CONFIRMED:
+# aws cognito-idp list-users --user-pool-id eu-west-1_D4o7fC9YF --query 'Users[?Attributes[?Name==`phone_number` && Value==`+27826353316`]].[Username,UserStatus]' --output table
+#
+# 📋 Next Steps:
+# - Cookies are now stored by REST Client
+# - All subsequent requests (TEST 4-6) will automatically use these cookies
+# - No need to manually copy/paste tokens!
+###
+
+
+###############################################
+# TEST 4: Get Current User (Protected)
+###############################################
+# Requires: accessToken cookie from TEST 3
+# @name getCurrentUser
+GET {{baseUrl}}/secure/auth/me
+
+###
+# Expected Response (200):
+# {
+#   "sub": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+#   "phone_number": "+27821234567",
+#   "phone_number_verified": true,
+#   "name": "John Doe"
+# }
+###
+
+
+###############################################
+# TEST 5: Refresh Access Token
+###############################################
+# Requires: refreshToken cookie from TEST 3
+# @name refreshToken
+POST {{baseUrl}}/secure/auth/refresh
+Content-Type: application/json
+
+{}
+
+###
+# Expected Response (200):
+# {
+#   "message": "Token refreshed successfully"
+# }
+#
+# ✅ Cookie Updated: accessToken (new token with fresh expiry)
+###
+
+
+###############################################
+# TEST 6: Logout
+###############################################
+# Requires: accessToken cookie
+# @name logout
+POST {{baseUrl}}/secure/auth/logout
+Content-Type: application/json
+
+{}
+
+###
+# Expected Response (200):
+# {
+#   "message": "Logout successful"
+# }
+#
+# ✅ Cookies Cleared: accessToken, refreshToken
+# After logout, TEST 4 will return 401 Unauthorized
+###
+
+
+###############################################
+# BONUS: Test Protected Endpoint After Logout
+###############################################
+# This should fail with 401 after logout
+# @name testAfterLogout
+GET {{baseUrl}}/secure/auth/me
+
+###
+# Expected Response (401):
+# {
+#   "error": "Access token not found or invalid"
+# }
+###
+
+
+###############################################
+# ALTERNATIVE TESTS
+###############################################
+
+### Test with Missing Phone Number (400 Error)
+POST {{baseUrl}}/secure/auth/register
+Content-Type: application/json
+
+{
+  "name": "Missing Phone"
+}
+
+### Test with Invalid Phone Format (400 Error)
+POST {{baseUrl}}/secure/auth/register
+Content-Type: application/json
+
+{
+  "phoneNumber": "1234567890"
+}
+
+### Test Send OTP for Non-Existent User (404 Error)
+POST {{baseUrl}}/secure/auth/send-otp
+Content-Type: application/json
+
+{
+  "phoneNumber": "+27829999999"
+}
+
+### Test with Wrong OTP (401 Error)
+POST {{baseUrl}}/secure/auth/verify-otp
+Content-Type: application/json
+
+{
+  "phoneNumber": "{{phoneNumber}}",
+  "otp": "000000",
+  "session": "SESSION_FROM_PREVIOUS_STEP"
+}
+
+###############################################
+# NOTES
+###############################################
+#
+# 🔐 REGISTRATION vs LOGIN - Key Differences:
+#
+# NEW USER REGISTRATION:
+# ├─ Step 1: POST /register
+# │  └─ Creates user with UNCONFIRMED status
+# ├─ Step 2: POST /verify-otp
+# │  └─ Confirms user (UNCONFIRMED → CONFIRMED)
+# └─ User can now login anytime
+#
+# RETURNING USER LOGIN:
+# ├─ Step 1: POST /send-otp
+# │  └─ User already CONFIRMED, just sends OTP
+# ├─ Step 2: POST /verify-otp
+# │  └─ Authenticates and returns tokens
+# └─ User authenticated
+#
+# ⚠️ IMPORTANT: The verify-otp endpoint handles BOTH cases!
+# - It knows if user is new (UNCONFIRMED) or returning (CONFIRMED)
+# - Cognito automatically confirms new users on successful OTP verification
+# - You don't need different endpoints for registration vs login verification
+#
+# 🔐 Cookie Management:
+# - REST Client automatically handles cookies
+# - HttpOnly cookies are stored per request chain
+# - Cookies persist across requests in the same file
+# - idToken expires in 15 minutes (use refresh endpoint)
+# - refreshToken expires in 30 days
+#
+# 📱 OTP Testing (Development):
+# - OTP codes are logged to CloudWatch (not sent via SMS in dev)
+# - Check logs: aws logs tail /aws/lambda/wyzesecure-create-auth-challenge-dev --follow
+# - OTP codes are 6 digits and expire after configured time
+# - In production, OTP will be sent via AWS SNS (SMS)
+#
+# 🔄 Complete Authentication Flow:
+# 1. Register (new user) OR Send OTP (returning user)
+# 2. Verify OTP → Get access & refresh tokens (NEW users also get CONFIRMED)
+# 3. Use idToken for protected endpoints (/me)
+# 4. Refresh token when idToken expires
+# 5. Logout to clear all tokens
+#
+# 🔍 Debugging Commands:
+# - List all users: aws cognito-idp list-users --user-pool-id eu-west-1_D4o7fC9YF
+# - Check user status: aws cognito-idp admin-get-user --user-pool-id eu-west-1_D4o7fC9YF --username +27826353316
+# - Delete test user: aws cognito-idp admin-delete-user --user-pool-id eu-west-1_D4o7fC9YF --username +27826353316
+# - View OTP logs: aws logs tail /aws/lambda/wyzesecure-create-auth-challenge-dev --follow
+#
+# ⚙️ Environment Variables:
+# - Change @baseUrl for different environments (dev/staging/prod)
+# - Change @phoneNumber for different test users
+#
+###############################################

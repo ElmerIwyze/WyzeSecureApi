@@ -17,8 +17,8 @@
 | **Deploy everything** | `.\deploy-all.ps1 -Environment dev` |
 | **Deploy Cognito only** | `.\deploy-all.ps1 -Environment dev -CognitoOnly` |
 | **Deploy API Gateway only** | `.\deploy-all.ps1 -Environment dev -ApiOnly` |
-| **Deploy Lambdas only** | `.\deploy-all.ps1 -Environment dev -LambdasOnly` |
-| **Fast Lambda update** | `.\deploy-all.ps1 -Environment dev -LambdasOnly -NoBuild` |
+| **Deploy Lambdas only** | `.\deploy-all.ps1 -Environment dev -AuthOnly` |
+| **Fast Lambda update** | `.\deploy-all.ps1 -Environment dev -AuthOnly -NoBuild` |
 | **Generate env.json** | `.\generate-env-json.ps1 -Environment dev` |
 | **Local testing** | `sam local start-api --env-vars env.json --port 3001` |
 
@@ -51,10 +51,10 @@ Deploy only what you need:
 .\deploy-all.ps1 -Environment dev -ApiOnly
 
 # Deploy only Lambdas (requires Cognito already deployed)
-.\deploy-all.ps1 -Environment dev -LambdasOnly
+.\deploy-all.ps1 -Environment dev -AuthOnly
 
 # Skip build step (faster, uses existing .aws-sam/build)
-.\deploy-all.ps1 -Environment dev -LambdasOnly -NoBuild
+.\deploy-all.ps1 -Environment dev -AuthOnly -NoBuild
 ```
 
 **Common workflows:**
@@ -64,7 +64,7 @@ Deploy only what you need:
 .\deploy-all.ps1 -Environment dev
 
 # Update Lambda code only (fastest)
-.\deploy-all.ps1 -Environment dev -LambdasOnly -NoBuild
+.\deploy-all.ps1 -Environment dev -AuthOnly -NoBuild
 
 # Redeploy Cognito after trigger changes
 .\deploy-all.ps1 -Environment dev -CognitoOnly
