@@ -1,0 +1,17 @@
+{
+  "name": "wyzesecure-cognito-verify-auth-challenge",
+  "version": "1.0.0",
+  "description": "Cognito trigger to verify auth challenge (validate OTP)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.7.2"
+  }
+}

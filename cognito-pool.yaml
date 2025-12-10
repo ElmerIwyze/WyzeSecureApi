@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  WyzeSecure Cognito User Pool with phone number authentication and SMS OTP
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: wyzesecure
+    Description: Prefix for resource names
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  FrontendDomain:
+    Type: String
+    Default: "http://localhost:3000"
+    Description: Frontend domain for Cognito callback URLs
+  EnvironmentStackName:
+    Type: String
+    Default: wyzesecure-dev
+    Description: Name of the environment stack (for importing CommonDependenciesLayer)
+
+Resources:
+  # SNS Role for Cognito to send SMS messages
+  CognitoSNSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackPrefix}-cognito-sns-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cognito-idp.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub "${StackPrefix}-cognito-sns-${Environment}"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonCognitoIdpSMSRole
+
+  # User Pool with phone number authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${StackPrefix}.portal.${Environment}"
+      # Phone number is the primary identifier
+      UsernameAttributes:
+        - phone_number
+      # Auto-verify phone numbers via SMS
+      AutoVerifiedAttributes:
+        - phone_number
+      # SMS Configuration
+      SmsConfiguration:
+        SnsCallerArn: !GetAtt CognitoSNSRole.Arn
+        ExternalId: !Sub "${StackPrefix}-cognito-sns-${Environment}"
+      SmsVerificationMessage: "Your WyzeSecure verification code is {####}"
+      SmsAuthenticationMessage: "Your WyzeSecure authentication code is {####}"
+      # User Schema
+      Schema:
+        - Name: phone_number
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: email
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: company
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      # MFA Configuration - Optional SMS MFA
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SMS_MFA
+      # Account recovery via phone
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_phone_number
+            Priority: 1
+      # Username configuration
+      UsernameConfiguration:
+        CaseSensitive: false
+      # Policies
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: false
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+      # User Pool Tags
+      UserPoolTags:
+        Project: WyzeSecure
+        Environment: !Ref Environment
+
+  # User Pool Domain for hosted UI (optional)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${StackPrefix}-auth-${Environment}-${AWS::AccountId}"
+      UserPoolId: !Ref UserPool
+
+  # App Client for phone authentication
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${StackPrefix}-client-${Environment}"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false  # Public clients (mobile/web) don't need secrets
+      # Auth flows for phone number + OTP
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      # Token validity
+      RefreshTokenValidity: 30  # 30 days
+      AccessTokenValidity: 60   # 60 minutes
+      IdTokenValidity: 60       # 60 minutes
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: minutes
+        IdToken: minutes
+      # Prevent user existence errors (security)
+      PreventUserExistenceErrors: ENABLED
+      # OAuth Configuration (optional for hosted UI)
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - phone
+        - openid
+        - profile
+      CallbackURLs:
+        - !Sub "${FrontendDomain}/auth/callback"
+        - !Sub "${FrontendDomain}"
+        - "http://localhost:3000/auth/callback"
+        - "http://localhost:3000"
+      LogoutURLs:
+        - !Sub "${FrontendDomain}/logout"
+        - !Sub "${FrontendDomain}"
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # User Groups for RBAC
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: Admins
+      Description: Administrators with full access
+      Precedence: 1
+
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: Users
+      Description: Regular users with standard access
+      Precedence: 10
+
+  # Lambda function for custom authentication flow (optional advanced OTP handling)
+  # This is needed if you want custom OTP generation/validation logic
+  DefineAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-define-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/define-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Defines the auth challenge flow for custom OTP
+      Layers:
+        - Fn::ImportValue: !Sub "${EnvironmentStackName}-CommonDependenciesLayerArn"
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+  DefineAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-define-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  CreateAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-create-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/create-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Creates and sends the OTP challenge
+      Layers:
+        - Fn::ImportValue: !Sub "${EnvironmentStackName}-CommonDependenciesLayerArn"
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: '*'
+
+  CreateAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-create-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  VerifyAuthChallengeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-verify-auth-challenge-${Environment}"
+      CodeUri: src/cognito-triggers/verify-auth-challenge/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Verifies the OTP entered by user
+      Layers:
+        - Fn::ImportValue: !Sub "${EnvironmentStackName}-CommonDependenciesLayerArn"
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+  VerifyAuthChallengeFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-verify-auth-challenge-${Environment}"
+      RetentionInDays: 7
+
+  # Cognito Lambda Trigger Permissions
+  DefineAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DefineAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  CreateAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  VerifyAuthChallengePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VerifyAuthChallengeFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # Update User Pool with Lambda Triggers
+  UserPoolWithTriggers:
+    Type: AWS::Cognito::UserPool
+    DependsOn:
+      - DefineAuthChallengePermission
+      - CreateAuthChallengePermission
+      - VerifyAuthChallengePermission
+    Properties:
+      UserPoolName: !Sub "${StackPrefix}-pool-${Environment}"
+      UsernameAttributes:
+        - phone_number
+      AutoVerifiedAttributes:
+        - phone_number
+      SmsConfiguration:
+        SnsCallerArn: !GetAtt CognitoSNSRole.Arn
+        ExternalId: !Sub "${StackPrefix}-cognito-sns-${Environment}"
+      SmsVerificationMessage: "Your WyzeSecure verification code is {####}"
+      SmsAuthenticationMessage: "Your WyzeSecure authentication code is {####}"
+      LambdaConfig:
+        DefineAuthChallenge: !GetAtt DefineAuthChallengeFunction.Arn
+        CreateAuthChallenge: !GetAtt CreateAuthChallengeFunction.Arn
+        VerifyAuthChallengeResponse: !GetAtt VerifyAuthChallengeFunction.Arn
+      Schema:
+        - Name: phone_number
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: email
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: company
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SMS_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_phone_number
+            Priority: 1
+      UsernameConfiguration:
+        CaseSensitive: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: false
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+      UserPoolTags:
+        Project: WyzeSecure
+        Environment: !Ref Environment
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPoolWithTriggers
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPoolWithTriggers.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolArn"
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Ref UserPoolDomain
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolDomain"
+
+  HostedUIURL:
+    Description: Cognito Hosted UI URL
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedUIURL"
+
+  AdminsGroupName:
+    Description: Admins group name
+    Value: Admins
+    Export:
+      Name: !Sub "${AWS::StackName}-AdminsGroupName"
+
+  UsersGroupName:
+    Description: Users group name
+    Value: Users
+    Export:
+      Name: !Sub "${AWS::StackName}-UsersGroupName"

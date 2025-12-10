@@ -1,0 +1,615 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  WyzeSecure Environment - Auth endpoints and environment stage
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: nodejs22.x
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        STACK_PREFIX: !Ref StackPrefix
+        ENVIRONMENT: !Ref Environment
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: wyzesecure
+    Description: Prefix for resource names
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  SharedApiStackName:
+    Type: String
+    Default: wyzesecure-shared-api
+    Description: Name of the shared API Gateway CloudFormation stack
+  CognitoUserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for phone authentication
+  CognitoClientId:
+    Type: String
+    Description: Cognito User Pool Client ID
+  CorsOrigin:
+    Type: String
+    Default: "*"
+    Description: CORS origin for API responses
+
+Resources:
+  # Common Dependencies Lambda Layer
+  CommonDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${StackPrefix}-common-dependencies-${Environment}"
+      Description: Shared dependencies for all WyzeSecure Lambda functions
+      ContentUri: layers/common-dependencies/
+      CompatibleRuntimes:
+        - nodejs22.x
+        - nodejs20.x
+        - nodejs18.x
+    Metadata:
+      BuildMethod: nodejs22.x
+
+  # Auth Lambda Function - handles phone OTP authentication
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-auth-${Environment}"
+      CodeUri: src/auth/
+      Handler: index.handler
+      Description: Handles phone number + OTP authentication via Cognito
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          CORS_ORIGIN: !Ref CorsOrigin
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:InitiateAuth
+                - cognito-idp:RespondToAuthChallenge
+                - cognito-idp:GetUser
+                - cognito-idp:AdminInitiateAuth
+                - cognito-idp:AdminRespondToAuthChallenge
+              Resource: !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
+      AutoPublishAlias: !Ref Environment
+
+  AuthFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-auth-${Environment}"
+      RetentionInDays: 7
+
+  # Lambda Authorizer Function - validates JWT from cookies
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+          - index.ts
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-authorizer-${Environment}"
+      CodeUri: src/authorizer/
+      Handler: index.handler
+      Description: JWT validator for API Gateway - reads tokens from HttpOnly cookies
+      Timeout: 10
+      MemorySize: 256
+      Layers:
+        - !Ref CommonDependenciesLayer
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          AWS_REGION: !Ref AWS::Region
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  AuthorizerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StackPrefix}-authorizer-${Environment}"
+      RetentionInDays: 7
+
+  # API Gateway Custom Authorizer
+  ApiGatewayAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub "${StackPrefix}-jwt-authorizer-${Environment}"
+      Type: REQUEST
+      AuthorizerUri: !Sub 
+        - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerArn}/invocations"
+        - AuthorizerArn: !GetAtt AuthorizerFunction.Arn
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      AuthorizerResultTtlInSeconds: 300
+      IdentitySource: method.request.header.Cookie
+
+  # Permission for API Gateway to invoke Authorizer
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AuthorizerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/*/*"
+        - ApiId:
+            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+
+  # API Gateway Resources under /proxy/auth
+  AuthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ProxyResourceId"
+      PathPart: 'auth'
+
+  # /proxy/auth/send-otp - Send OTP to phone number
+  SendOtpResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'send-otp'
+
+  SendOtpPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref SendOtpResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+          - {}
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  SendOtpOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref SendOtpResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # /proxy/auth/verify-otp - Verify OTP and authenticate
+  VerifyOtpResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'verify-otp'
+
+  VerifyOtpPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref VerifyOtpResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+          - {}
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  VerifyOtpOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref VerifyOtpResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # /proxy/auth/refresh - Refresh tokens (PROTECTED)
+  RefreshResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'refresh'
+
+  RefreshPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref RefreshResource
+      HttpMethod: POST
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+          - {}
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  RefreshOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref RefreshResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # /proxy/auth/logout - Clear cookies (PUBLIC)
+  LogoutResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'logout'
+
+  LogoutPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref LogoutResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+          - {}
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  LogoutOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref LogoutResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # /proxy/auth/me - Get current user (PROTECTED)
+  MeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ParentId: !Ref AuthResource
+      PathPart: 'me'
+
+  MeGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref MeResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${stageVariables.stackPrefix}-auth-${stageVariables.environment}:${stageVariables.alias}/invocations"
+          - {}
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  MeOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      ResourceId: !Ref MeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,Cookie'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${CorsOrigin}'"
+              method.response.header.Access-Control-Allow-Credentials: "'true'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Credentials: true
+
+  # API Gateway Deployment - includes all auth methods
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - SendOtpPost
+      - SendOtpOptions
+      - VerifyOtpPost
+      - VerifyOtpOptions
+      - RefreshPost
+      - RefreshOptions
+      - LogoutPost
+      - LogoutOptions
+      - MeGet
+      - MeOptions
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      Description: !Sub "Deployment with auth endpoints - ${Environment}"
+
+  # CloudWatch Role for API Gateway
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${StackPrefix}-apigateway-cloudwatch-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${StackPrefix}-${Environment}"
+      RetentionInDays: 7
+
+  # API Gateway Stage with stage variables for dynamic Lambda routing
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - ApiGatewayAccount
+      - ApiGatewayAccessLogGroup
+    Properties:
+      RestApiId:
+        Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      DeploymentId: !Ref ApiGatewayDeployment
+      StageName: !Ref Environment
+      Variables:
+        environment: !Ref Environment
+        stackPrefix: !Ref StackPrefix
+        alias: !Ref Environment
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          LoggingLevel: INFO
+          MetricsEnabled: true
+          DataTraceEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
+
+  # Lambda Permissions for API Gateway to invoke auth function
+  AuthFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuthFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/${Environment}/*/*"
+        - ApiId:
+            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+
+  # Permission for the alias
+  AuthFunctionAliasPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "${AuthFunction}:${Environment}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/${Environment}/*/*"
+        - ApiId:
+            Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+
+Outputs:
+  ApiGatewayUrl:
+    Description: URL of the Dev API Gateway stage
+    Value: !Sub
+      - "${BaseUrl}/${Environment}"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayUrl"
+
+  SendOtpEndpoint:
+    Description: Send OTP endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/proxy/auth/send-otp"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+
+  VerifyOtpEndpoint:
+    Description: Verify OTP endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/proxy/auth/verify-otp"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+
+  RefreshEndpoint:
+    Description: Refresh token endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/proxy/auth/refresh"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+
+  LogoutEndpoint:
+    Description: Logout endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/proxy/auth/logout"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+
+  MeEndpoint:
+    Description: Get current user endpoint
+    Value: !Sub
+      - "${BaseUrl}/${Environment}/proxy/auth/me"
+      - BaseUrl:
+          Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayRestApiUrl"
+
+  AuthFunctionArn:
+    Description: ARN of the auth function
+    Value: !GetAtt AuthFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AuthFunctionArn"
+
+  CommonDependenciesLayerArn:
+    Description: ARN of the common dependencies layer
+    Value: !Ref CommonDependenciesLayer
+    Export:
+      Name: !Sub "${AWS::StackName}-CommonDependenciesLayerArn"

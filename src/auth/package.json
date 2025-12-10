@@ -1,0 +1,20 @@
+{
+  "name": "wyzesecure-auth",
+  "version": "1.0.0",
+  "description": "WyzeSecure authentication with phone OTP",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.675.0",
+    "jsonwebtoken": "^9.0.2",
+    "@types/aws-lambda": "^8.10.145",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.7.2"
+  }
+}

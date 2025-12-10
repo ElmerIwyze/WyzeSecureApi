@@ -1,0 +1,22 @@
+version = 0.1
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+
+[shared]
+[shared.deploy.parameters]
+stack_name = "wyzesecure-shared-api"
+s3_prefix = "wyzesecure-shared-api"
+resolve_s3 = true
+region = "eu-west-1"
+parameter_overrides = "StackPrefix=wyzesecure CorsOrigin=*"
+
+[dev]
+[dev.deploy.parameters]
+stack_name = "wyzesecure-dev"
+s3_prefix = "wyzesecure-dev"
+resolve_s3 = true
+region = "eu-west-1"
+parameter_overrides = "StackPrefix=wyzesecure Environment=dev SharedApiStackName=wyzesecure-shared-api CognitoUserPoolId=REPLACE CognitoClientId=REPLACE CorsOrigin=*"

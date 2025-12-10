@@ -1,0 +1,22 @@
+{
+  "name": "wyzesecure-authorizer",
+  "version": "1.0.0",
+  "description": "Lambda Authorizer for WyzeSecure API Gateway",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "jwk-to-pem": "^2.0.5",
+    "axios": "^1.6.2",
+    "@types/aws-lambda": "^8.10.145",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/jwk-to-pem": "^2.0.3",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.7.2"
+  }
+}

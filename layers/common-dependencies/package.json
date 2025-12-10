@@ -1,0 +1,13 @@
+{
+  "name": "wyzesecure-common-dependencies",
+  "version": "1.0.0",
+  "description": "Shared dependencies layer for all WyzeSecure Lambda functions",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.675.0",
+    "jsonwebtoken": "^9.0.2",
+    "jwk-to-pem": "^2.0.5",
+    "axios": "^1.6.2",
+    "aws-sdk": "^2.1691.0"
+  }
+}
