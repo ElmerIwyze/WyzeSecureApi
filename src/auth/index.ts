@@ -8,11 +8,14 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
+  AdminInitiateAuthCommand,
   RespondToAuthChallengeCommand,
+  AdminRespondToAuthChallengeCommand,
   SignUpCommand,
   GlobalSignOutCommand,
   GetUserCommand,
   InitiateAuthCommandInput,
+  AdminInitiateAuthCommandInput,
   RespondToAuthChallengeCommandInput
 } from '@aws-sdk/client-cognito-identity-provider';
 import * as jwt from 'jsonwebtoken';
@@ -166,18 +169,19 @@ async function registerUser(body: RegisterBody): Promise<APIGatewayProxyResult> 
     const signUpCommand = new SignUpCommand(signUpParams);
     await cognitoClient.send(signUpCommand);
 
-    // Now initiate OTP flow for verification
-    // The Pre-Authentication trigger will allow UNCONFIRMED users to proceed
+    // Now initiate OTP flow for verification using AdminInitiateAuth
+    // AdminInitiateAuth allows UNCONFIRMED users to proceed with custom auth
     // When OTP is verified, Cognito will automatically confirm the user
-    const commandInput: InitiateAuthCommandInput = {
+    const commandInput: AdminInitiateAuthCommandInput = {
       AuthFlow: 'CUSTOM_AUTH',
+      UserPoolId: COGNITO_USER_POOL_ID,
       ClientId: COGNITO_CLIENT_ID,
       AuthParameters: {
         USERNAME: phoneNumber
       }
     };
 
-    const command = new InitiateAuthCommand(commandInput);
+    const command = new AdminInitiateAuthCommand(commandInput);
     const response = await cognitoClient.send(command);
 
     return {
