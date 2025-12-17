@@ -200,7 +200,7 @@ confirm_changeset = false
 fail_on_empty_changeset = false
 resolve_s3 = true
 s3_prefix = "myapp-shared-api"
-region = "us-east-1"
+region = "eu-west-1"
 parameter_overrides = "StackPrefix=\"myapp\" CorsOrigin=\"*\""
 ```
 
@@ -385,7 +385,7 @@ fail_on_empty_changeset = false
 stack_name = "myapp-core-dev"
 s3_prefix = "myapp-core-dev"
 resolve_s3 = true
-region = "us-east-1"
+region = "eu-west-1"
 parameter_overrides = "StackPrefix=\"myapp\" Environment=\"dev\" SharedApiStackName=\"myapp-shared-api\" CorsOrigin=\"https://localhost:3000\""
 
 [staging]
@@ -393,7 +393,7 @@ parameter_overrides = "StackPrefix=\"myapp\" Environment=\"dev\" SharedApiStackN
 stack_name = "myapp-core-staging"
 s3_prefix = "myapp-core-staging"
 resolve_s3 = true
-region = "us-east-1"
+region = "eu-west-1"
 parameter_overrides = "StackPrefix=\"myapp\" Environment=\"staging\" SharedApiStackName=\"myapp-shared-api\" CorsOrigin=\"https://staging.myapp.com\""
 
 [prod]
@@ -401,7 +401,7 @@ parameter_overrides = "StackPrefix=\"myapp\" Environment=\"staging\" SharedApiSt
 stack_name = "myapp-core-prod"
 s3_prefix = "myapp-core-prod"
 resolve_s3 = true
-region = "us-east-1"
+region = "eu-west-1"
 parameter_overrides = "StackPrefix=\"myapp\" Environment=\"prod\" SharedApiStackName=\"myapp-shared-api\" CorsOrigin=\"https://myapp.com\""
 ```
 

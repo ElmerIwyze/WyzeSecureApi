@@ -1054,6 +1054,16 @@ Resources:
       LogGroupName: !Sub "/aws/apigateway/${StackPrefix}-${Environment}"
       RetentionInDays: 7
 
+  ApiGatewayExecutionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub:
+          - "API-Gateway-Execution-Logs_${ApiId}/${Environment}"
+          - ApiId:
+              Fn::ImportValue: !Sub "${SharedApiStackName}-ApiGatewayId"
+      RetentionInDays: 7
+
   # Custom Resource to create new deployment and update stage on every stack update
   UpdateApiGatewayStage:
     Type: Custom::UpdateStage
@@ -1150,6 +1160,7 @@ Resources:
     DependsOn:
       - ApiGatewayAccount
       - ApiGatewayAccessLogGroup
+      - ApiGatewayExecutionLogGroup
       - ApiGatewayDeployment
     Properties:
       RestApiId:

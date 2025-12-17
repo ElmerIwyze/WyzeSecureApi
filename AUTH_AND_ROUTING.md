@@ -627,9 +627,9 @@ The function registry maps routing parameters to Lambda function ARNs using envi
 {PROVIDER}_{SERVICE}_COMPLIANCE_{ACTION}_FUNCTION=arn:aws:lambda:...
 
 Examples:
-AWS_S3_COMPLIANCE_SCAN_FUNCTION=arn:aws:lambda:us-east-1:123:function:scan
-AWS_S3_COMPLIANCE_STATUS_FUNCTION=arn:aws:lambda:us-east-1:123:function:status
-AUTH_COGNITO_FUNCTION=arn:aws:lambda:us-east-1:123:function:auth-cognito
+AWS_S3_COMPLIANCE_SCAN_FUNCTION=arn:aws:lambda:eu-west-1:123:function:scan
+AWS_S3_COMPLIANCE_STATUS_FUNCTION=arn:aws:lambda:eu-west-1:123:function:status
+AUTH_COGNITO_FUNCTION=arn:aws:lambda:eu-west-1:123:function:auth-cognito
 ```
 
 **Registry Structure:**
@@ -726,7 +726,7 @@ Cookie: idToken=eyJraWQiOiJ...; refreshToken=eyJjdHkiOiJ...
 
 {
   "filters": {
-    "region": "us-east-1",
+    "region": "eu-west-1",
     "bucketPrefix": "prod-"
   }
 }
@@ -763,7 +763,7 @@ Access-Control-Allow-Origin: *
     "buckets": [
       {
         "name": "prod-data-bucket",
-        "region": "us-east-1",
+        "region": "eu-west-1",
         "encryption": true,
         "versioning": true,
         "publicAccess": false,
@@ -931,27 +931,27 @@ Set-Cookie: refreshToken=eyJjdHkiOiJ...; HttpOnly; Secure; SameSite=Lax; Max-Age
 
 **Auth Lambda:**
 ```bash
-COGNITO_USER_POOL_ID=us-east-1_abc123
+COGNITO_USER_POOL_ID=eu-west-1_abc123
 COGNITO_APP_CLIENT_ID=your-app-client-id
 COGNITO_DOMAIN=auditron
 CORS_ORIGIN=https://app.auditron.com
-ENVIRONMENT_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123:secret:auditron-dev
-AWS_REGION=us-east-1
+ENVIRONMENT_SECRET_ARN=arn:aws:secretsmanager:eu-west-1:123:secret:auditron-dev
+AWS_REGION=eu-west-1
 ```
 
 **Proxy Lambda:**
 ```bash
-COGNITO_USER_POOL_ID=us-east-1_abc123
+COGNITO_USER_POOL_ID=eu-west-1_abc123
 COGNITO_APP_CLIENT_ID=your-app-client-id
-AWS_REGION=us-east-1
+AWS_REGION=eu-west-1
 CORS_ORIGIN=https://app.auditron.com
 STACK_PREFIX=auditron
 ENVIRONMENT=dev
 
 # Function ARNs
-AUTH_COGNITO_FUNCTION=arn:aws:lambda:us-east-1:123:function:auth
-AWS_S3_COMPLIANCE_SCAN_FUNCTION=arn:aws:lambda:us-east-1:123:function:scan
-AWS_S3_COMPLIANCE_STATUS_FUNCTION=arn:aws:lambda:us-east-1:123:function:status
+AUTH_COGNITO_FUNCTION=arn:aws:lambda:eu-west-1:123:function:auth
+AWS_S3_COMPLIANCE_SCAN_FUNCTION=arn:aws:lambda:eu-west-1:123:function:scan
+AWS_S3_COMPLIANCE_STATUS_FUNCTION=arn:aws:lambda:eu-west-1:123:function:status
 ```
 
 ---
@@ -1103,7 +1103,7 @@ curl -X POST https://api.auditron.com/proxy/auth/login \
 curl -X POST https://api.auditron.com/proxy/compliance/aws/s3/scan \
   -H "Content-Type: application/json" \
   -b cookies.txt \
-  -d '{"filters":{"region":"us-east-1"}}'
+  -d '{"filters":{"region":"eu-west-1"}}'
 
 # Logout
 curl -X POST https://api.auditron.com/proxy/auth/logout \

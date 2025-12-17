@@ -235,6 +235,66 @@ Resources:
         - ApiId:
             Fn::ImportValue:
               Fn::Sub: ${SharedApiStackName}-ApiGatewayId
+  PreAuthenticationFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+        - index.ts
+        External:
+        - '@aws-sdk/*'
+        Minify: false
+        Sourcemap: true
+        Target: es2020
+      SamResourceId: PreAuthenticationFunction
+    Properties:
+      FunctionName:
+        Fn::Sub: ${StackPrefix}-pre-authentication-${Environment}
+      CodeUri: PreAuthenticationFunction
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Description: Allows UNCONFIRMED users to proceed with custom auth flow
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+      - Ref: CommonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT:
+            Ref: Environment
+          NODE_OPTIONS: ' --enable-source-maps'
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: '*'
+  PreAuthenticationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${StackPrefix}-pre-authentication-${Environment}
+      RetentionInDays: 7
+  PreAuthenticationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: PreAuthenticationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn:
+        Fn::Sub:
+        - arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+        - UserPoolId:
+            Fn::If:
+            - UseCognitoStackImport
+            - Fn::ImportValue:
+                Fn::Sub: ${CognitoStackName}-UserPoolId
+            - Ref: CognitoUserPoolId
   DefineAuthChallengeFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -423,6 +483,7 @@ Resources:
   UserPoolLambdaConfig:
     Type: Custom::CognitoUserPoolLambdaConfig
     DependsOn:
+    - PreAuthenticationPermission
     - DefineAuthChallengePermission
     - CreateAuthChallengePermission
     - VerifyAuthChallengePermission
@@ -437,6 +498,10 @@ Resources:
         - Fn::ImportValue:
             Fn::Sub: ${CognitoStackName}-UserPoolId
         - Ref: CognitoUserPoolId
+      PreAuthentication:
+        Fn::GetAtt:
+        - PreAuthenticationFunction
+        - Arn
       DefineAuthChallenge:
         Fn::GetAtt:
         - DefineAuthChallengeFunction
@@ -465,7 +530,8 @@ Resources:
         \ === 'Delete') {\n    await response.send(event, context, response.SUCCESS);\n\
         \    return;\n  }\n  \n  try {\n    const client = new CognitoIdentityProviderClient({});\n\
         \    const params = {\n      UserPoolId: event.ResourceProperties.UserPoolId,\n\
-        \      LambdaConfig: {\n        DefineAuthChallenge: event.ResourceProperties.DefineAuthChallenge,\n\
+        \      LambdaConfig: {\n        PreAuthentication: event.ResourceProperties.PreAuthentication,\n\
+        \        DefineAuthChallenge: event.ResourceProperties.DefineAuthChallenge,\n\
         \        CreateAuthChallenge: event.ResourceProperties.CreateAuthChallenge,\n\
         \        VerifyAuthChallengeResponse: event.ResourceProperties.VerifyAuthChallengeResponse\n\
         \      }\n    };\n    \n    await client.send(new UpdateUserPoolCommand(params));\n\
@@ -1062,6 +1128,16 @@ Resources:
       LogGroupName:
         Fn::Sub: /aws/apigateway/${StackPrefix}-${Environment}
       RetentionInDays: 7
+  ApiGatewayExecutionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub:
+        - API-Gateway-Execution-Logs_${ApiId}/${Environment}
+        - ApiId:
+            Fn::ImportValue:
+              Fn::Sub: ${SharedApiStackName}-ApiGatewayId
+      RetentionInDays: 7
   UpdateApiGatewayStage:
     Type: Custom::UpdateStage
     DependsOn:
@@ -1151,6 +1227,7 @@ Resources:
     DependsOn:
     - ApiGatewayAccount
     - ApiGatewayAccessLogGroup
+    - ApiGatewayExecutionLogGroup
     - ApiGatewayDeployment
     Properties:
       RestApiId:

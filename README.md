@@ -215,7 +215,7 @@ sam local start-api --env-vars env.json --port 3001
 ### 1. Send OTP
 
 ```powershell
-curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/auth/send-otp `
+curl -X POST https://YOUR_API_ID.execute-api.eu-west-1.amazonaws.com/dev/secure/auth/send-otp `
   -H "Content-Type: application/json" `
   -d '{\"phoneNumber\": \"+12345678900\"}'
 ```
@@ -236,7 +236,7 @@ curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/
 Check your phone for the SMS with the OTP code, then:
 
 ```powershell
-curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/auth/verify-otp `
+curl -X POST https://YOUR_API_ID.execute-api.eu-west-1.amazonaws.com/dev/secure/auth/verify-otp `
   -H "Content-Type: application/json" `
   -d '{\"phoneNumber\": \"+12345678900\", \"otp\": \"123456\", \"session\": \"SESSION_TOKEN_HERE\"}'
 ```
@@ -252,7 +252,7 @@ curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/
 ### 3. Get Current User (Requires Auth)
 
 ```powershell
-curl -X GET https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/auth/me `
+curl -X GET https://YOUR_API_ID.execute-api.eu-west-1.amazonaws.com/dev/secure/auth/me `
   -H "Cookie: accessToken=YOUR_ACCESS_TOKEN"
 ```
 
@@ -268,7 +268,7 @@ curl -X GET https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/a
 ### 4. Refresh Tokens (Requires Auth)
 
 ```powershell
-curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/auth/refresh `
+curl -X POST https://YOUR_API_ID.execute-api.eu-west-1.amazonaws.com/dev/secure/auth/refresh `
   -H "Cookie: refreshToken=YOUR_REFRESH_TOKEN"
 ```
 
@@ -283,7 +283,7 @@ curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/
 ### 5. Logout
 
 ```powershell
-curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/dev/secure/auth/logout
+curl -X POST https://YOUR_API_ID.execute-api.eu-west-1.amazonaws.com/dev/secure/auth/logout
 ```
 
 **Response:**

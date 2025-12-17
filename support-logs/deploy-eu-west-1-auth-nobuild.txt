@@ -1,0 +1,79 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20251217100657
+Username: MUFEP\ebotha1
+RunAs User: MUFEP\ebotha1
+Configuration Name: 
+Machine: MF070736 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -noexit -command try { . "c:\Users\ebotha1\AppData\Local\Programs\Microsoft VS Code\resources\app\out\vs\workbench\contrib\terminal\common\scripts\shellIntegration.ps1" } catch {}
+Process ID: 34872
+PSVersion: 5.1.26100.6899
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.6899
+BuildVersion: 10.0.26100.6899
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is .\support-logs\deploy-eu-west-1-auth-nobuild.txt
+Ensuring SAM artifact bucket 'wyzesecure-sam-deployments-5731' exists in eu-west-1...
+
+========================================
+  WyzeSecure Deployment - dev
+========================================
+Cognito:     ⏭️  Skip
+Shared API:  ⏭️  Skip
+Auth Stack:  ✅ Yes (Lambdas + Endpoints + Stage)
+
+[1/3] ⏭️  Skipping Cognito deployment
+[2/3] ⏭️  Skipping Shared API deployment
+[3/3] Deploying Environment Stack...
+Stack: wyzesecure-dev
+Cognito Import: wyzesecure-portal-dev
+⏭️  Skipping build (reusing existing .aws-sam/build)
+Deployment Timestamp: 1765958821
+Deploying Environment stack...
+Monitoring CloudFormation events for detailed error information...
+
+
+❌ Deployment failed!
+
+🔎 CloudFormation diagnostics for stack: wyzesecure-dev
+Recent stack events (newest first):
+  [2025-12-17 09:47:07] REVIEW_IN_PROGRESS - wyzesecure-dev (AWS::CloudFormation::Stack)
+    Reason: User Initiated
+
+Change set: samcli-deploy1765958840 [FAILED]
+  Reason: The following hook(s)/validation failed: [AWS::EarlyValidation::ResourceExistenceCheck]. To troubleshoot Early Validation errors, use the DescribeEvents API for detailed failure information.
+  Created: 2025-12-17T08:07:23.329Z
+  Resources in change set (sample):
+    - ApiDocumentationVersion [AWS::ApiGateway::DocumentationVersion]
+    - ApiGatewayAccessLogGroup [AWS::Logs::LogGroup]
+    - ApiGatewayAccount [AWS::ApiGateway::Account]
+    - ApiGatewayAuthorizer [AWS::ApiGateway::Authorizer]
+    - ApiGatewayCloudWatchRole [AWS::IAM::Role]
+
+Change set: samcli-deploy1765958611 [FAILED]
+  Reason: The following hook(s)/validation failed: [AWS::EarlyValidation::ResourceExistenceCheck]. To troubleshoot Early Validation errors, use the DescribeEvents API for detailed failure information.
+  Created: 2025-12-17T08:03:34.674Z
+  Resources in change set (sample):
+    - ApiDocumentationVersion [AWS::ApiGateway::DocumentationVersion]
+    - ApiGatewayAccessLogGroup [AWS::Logs::LogGroup]
+    - ApiGatewayAccount [AWS::ApiGateway::Account]
+    - ApiGatewayAuthorizer [AWS::ApiGateway::Authorizer]
+    - ApiGatewayCloudWatchRole [AWS::IAM::Role]
+
+Change set: samcli-deploy1765958468 [FAILED]
+  Reason: The following hook(s)/validation failed: [AWS::EarlyValidation::ResourceExistenceCheck]. To troubleshoot Early Validation errors, use the DescribeEvents API for detailed failure information.
+  Created: 2025-12-17T08:01:11.663Z
+  Resources in change set (sample):
+    - ApiDocumentationVersion [AWS::ApiGateway::DocumentationVersion]
+    - ApiGatewayAccessLogGroup [AWS::Logs::LogGroup]
+    - ApiGatewayAccount [AWS::ApiGateway::Account]
+    - ApiGatewayAuthorizer [AWS::ApiGateway::Authorizer]
+    - ApiGatewayCloudWatchRole [AWS::IAM::Role]
+**********************
+Windows PowerShell transcript end
+End time: 20251217100750
+**********************

@@ -8,9 +8,10 @@ fail_on_empty_changeset = false
 # Cognito User Pool Stack (deploy FIRST)
 [cognito-dev]
 [cognito-dev.deploy.parameters]
-stack_name = "wyzesecure-cognito-dev"
-s3_prefix = "wyzesecure-cognito-dev"
-resolve_s3 = true
+stack_name = "wyzesecure-portal-dev"
+s3_bucket = "wyzesecure-sam-deployments-5731"
+s3_prefix = "wyzesecure-portal-dev"
+resolve_s3 = false
 region = "eu-west-1"
 capabilities = "CAPABILITY_NAMED_IAM"
 parameter_overrides = "StackPrefix=wyzesecure Environment=dev FrontendDomain=http://localhost:3000"
@@ -19,8 +20,9 @@ parameter_overrides = "StackPrefix=wyzesecure Environment=dev FrontendDomain=htt
 [shared]
 [shared.deploy.parameters]
 stack_name = "wyzesecure-shared-api"
+s3_bucket = "wyzesecure-sam-deployments-5731"
 s3_prefix = "wyzesecure-shared-api"
-resolve_s3 = true
+resolve_s3 = false
 region = "eu-west-1"
 parameter_overrides = "StackPrefix=wyzesecure CorsOrigin=*"
 
@@ -28,9 +30,10 @@ parameter_overrides = "StackPrefix=wyzesecure CorsOrigin=*"
 [dev]
 [dev.deploy.parameters]
 stack_name = "wyzesecure-dev"
+s3_bucket = "wyzesecure-sam-deployments-5731"
 s3_prefix = "wyzesecure-dev"
-resolve_s3 = true
+resolve_s3 = false
 region = "eu-west-1"
 capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
-# Automatically imports Cognito IDs from wyzesecure-cognito-dev stack
-parameter_overrides = "StackPrefix=wyzesecure Environment=dev SharedApiStackName=wyzesecure-shared-api CognitoStackName=wyzesecure-cognito-dev CorsOrigin=*"
+# Automatically imports Cognito IDs from wyzesecure-portal-dev stack
+parameter_overrides = "StackPrefix=wyzesecure Environment=dev SharedApiStackName=wyzesecure-shared-api CognitoStackName=wyzesecure-portal-dev CorsOrigin=*"
